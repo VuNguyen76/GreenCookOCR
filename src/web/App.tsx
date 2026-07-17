@@ -47,6 +47,11 @@ interface DocumentDetail extends DocumentSummary {
   items: Array<{
     id: string;
     line_no: number;
+    po_number: string | null;
+    po_date: string | null;
+    store_code: string | null;
+    store_name: string | null;
+    delivery_address: string | null;
     product_code: string | null;
     vendor_product_code: string | null;
     barcode: string | null;
@@ -64,11 +69,15 @@ interface DocumentDetail extends DocumentSummary {
 const STATUS_LABELS: Record<Status, string> = {
   queued: "Đang chờ",
   preprocessing: "Tiền xử lý",
-  ocr_running: "Gemini OCR",
+  ocr_running: "Đang trích xuất",
   validating: "Kiểm tra JSON",
   completed: "Hoàn tất",
   needs_review: "Cần kiểm tra",
   failed: "Thất bại"
+};
+const VI_NUMBER_FORMAT = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 6 });
+const WARNING_TRANSLATIONS: Record<string, string> = {
+  "total_amount is calculated as subtotal_amount + tax_amount because the grand total after tax was not explicitly printed on the document.": "Tổng đơn hàng được tính bằng tiền hàng cộng thuế vì chứng từ không in rõ tổng thanh toán sau thuế."
 };
 
 export function App() {
@@ -155,6 +164,16 @@ export function App() {
     await loadDocuments();
   }, [loadDocuments]);
 
+  const confirm = useCallback(async (id: string) => {
+    const response = await fetch(`/api/documents/${id}/confirm`, { method: "POST" });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setError(payload.error ?? "Không thể xác nhận tài liệu");
+      return;
+    }
+    await loadDocuments();
+  }, [loadDocuments]);
+
   const total = useMemo(() => Object.values(stats).reduce((sum, count) => sum + count, 0), [stats]);
   const processing = (stats.queued ?? 0) + (stats.preprocessing ?? 0) + (stats.ocr_running ?? 0) + (stats.validating ?? 0);
   const issues = (stats.failed ?? 0) + (stats.needs_review ?? 0);
@@ -167,8 +186,8 @@ export function App() {
           <div><strong>GreenCookOCR</strong><span>Gemini document pipeline</span></div>
         </div>
         <div className="header-actions">
-          <button className="icon-button" title="Làm mới" onClick={() => void loadDocuments()}><RefreshCw size={18} /></button>
-          <button className="primary-button" disabled={uploading} onClick={() => inputRef.current?.click()}>
+          <button type="button" className="icon-button" title="Làm mới" onClick={() => void loadDocuments()}><RefreshCw size={18} /></button>
+          <button type="button" className="primary-button" disabled={uploading} onClick={() => inputRef.current?.click()}>
             {uploading ? <LoaderCircle className="spin" size={18} /> : <Upload size={18} />}
             Chọn file
           </button>
@@ -210,7 +229,7 @@ export function App() {
           {uploading && <div className="upload-track"><span style={{ width: `${uploadProgress.current / uploadProgress.total * 100}%` }} /></div>}
         </section>
 
-        {error && <div className="error-banner"><AlertTriangle size={17} /><span>{error}</span><button title="Đóng" onClick={() => setError(null)}><X size={17} /></button></div>}
+        {error && <div className="error-banner"><AlertTriangle size={17} /><span>{error}</span><button type="button" title="Đóng" onClick={() => setError(null)}><X size={17} /></button></div>}
 
         <section className="workspace">
           <div className="queue-pane">
@@ -220,14 +239,24 @@ export function App() {
                 <thead><tr><th>Tài liệu</th><th>Tiêu đề</th><th>Mẫu</th><th>Trạng thái</th><th className="numeric">Dòng</th><th aria-label="Thao tác" /></tr></thead>
                 <tbody>
                   {documents.map((document) => (
-                    <tr key={document.id} className={selected?.id === document.id ? "selected" : ""} onClick={() => void openDocument(document.id)}>
+                    <tr
+                      key={document.id}
+                      className={selected?.id === document.id ? "selected" : ""}
+                      tabIndex={0}
+                      onClick={() => void openDocument(document.id)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        void openDocument(document.id);
+                      }}
+                    >
                       <td><div className="file-cell">{fileIcon(document.original_name)}<div><strong title={document.original_name}>{document.original_name}</strong><span>{formatBytes(Number(document.size_bytes))}</span></div></div></td>
                       <td><span className="title-cell">{document.document_title ?? "Chưa nhận diện"}</span></td>
                       <td><code>{shortTemplate(document.template_key)}</code></td>
                       <td><StatusBadge status={document.status} /></td>
                       <td className="numeric">{document.item_count ?? 0}</td>
                       <td><div className="row-actions">
-                        {(document.status === "failed" || document.status === "needs_review") && <button className="icon-button compact" title="Chạy lại" onClick={(event) => { event.stopPropagation(); void retry(document.id); }}><RotateCcw size={16} /></button>}
+                        {(document.status === "failed" || document.status === "needs_review") && <button type="button" className="icon-button compact" title="Chạy lại" onClick={(event) => { event.stopPropagation(); void retry(document.id); }}><RotateCcw size={16} /></button>}
                         <ChevronRight size={17} />
                       </div></td>
                     </tr>
@@ -238,7 +267,7 @@ export function App() {
             </div>
           </div>
 
-          {selected && <DetailPane document={selected} onClose={() => setSelected(null)} onRetry={retry} />}
+          {selected && <DetailPane document={selected} onClose={() => setSelected(null)} onRetry={retry} onConfirm={confirm} />}
         </section>
       </main>
     </div>
@@ -254,13 +283,17 @@ function StatusBadge({ status }: { status: Status }) {
   return <span className={`status status-${status}`}>{active && <LoaderCircle className="spin" size={13} />}{STATUS_LABELS[status]}</span>;
 }
 
-function DetailPane({ document, onClose, onRetry }: { document: DocumentDetail; onClose: () => void; onRetry: (id: string) => Promise<void> }) {
+function DetailPane({ document, onClose, onRetry, onConfirm }: { document: DocumentDetail; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void> }) {
+  const poNumbers = [...new Set(document.items.map((item) => item.po_number).filter((value): value is string => Boolean(value)))];
+  const hasRowOrders = poNumbers.length > 1;
+  const poSummary = document.po_number ?? (hasRowOrders ? `${poNumbers.length} PO trong file` : poNumbers[0] ?? "-");
+
   return <aside className="detail-pane">
-    <div className="detail-header"><div><span>Chi tiết đơn hàng</span><h2>{document.document_title ?? document.original_name}</h2></div><button className="icon-button" title="Đóng" onClick={onClose}><X size={18} /></button></div>
+    <div className="detail-header"><div><span>Chi tiết chứng từ</span><h2>{document.document_title ?? document.original_name}</h2></div><button type="button" className="icon-button" title="Đóng" onClick={onClose}><X size={18} /></button></div>
     <div className="detail-meta">
       <Meta label="File" value={document.original_name} />
       <Meta label="Mẫu" value={document.template_key ?? "Chưa xác định"} mono />
-      <Meta label="Số PO" value={document.po_number ?? "-"} />
+      <Meta label="Số PO" value={poSummary} />
       <Meta label="Ngày PO" value={formatDate(document.po_date)} />
       <Meta label="Đơn vị" value={document.issuer_name ?? "-"} />
       <Meta label="Trạng thái" value={STATUS_LABELS[document.status]} />
@@ -268,24 +301,28 @@ function DetailPane({ document, onClose, onRetry }: { document: DocumentDetail; 
     <div className="totals-strip">
       <TotalStat label="Tiền hàng" value={formatMoney(document.subtotal_amount, document.currency)} />
       <TotalStat label="Thuế" value={formatMoney(document.tax_amount, document.currency)} />
-      <TotalStat label="Tổng đơn hàng" value={formatMoney(document.total_amount, document.currency)} emphasis />
+      <TotalStat label={hasRowOrders ? "Tổng giá trị dòng" : "Tổng đơn hàng"} value={formatMoney(document.total_amount, document.currency)} emphasis />
     </div>
     {document.error_message && <div className="detail-error"><AlertTriangle size={16} />{document.error_message}</div>}
-    {document.warnings?.length > 0 && <div className="warning-list">{document.warnings.map((warning) => <div key={warning}><AlertTriangle size={14} />{warning}</div>)}</div>}
+    {document.warnings?.length > 0 && <div className="warning-list">{document.warnings.map((warning) => <div key={warning}><AlertTriangle size={14} />{formatWarning(warning)}</div>)}</div>}
     <div className="detail-table-heading"><h3>Dòng sản phẩm</h3><span>{document.items.length} dòng</span></div>
-    <div className="detail-table-wrap"><table className="product-table"><thead><tr><th>#</th><th>Mã sản phẩm</th><th>Barcode</th><th>Tên sản phẩm</th><th className="numeric">Số lượng</th><th>Đơn vị</th><th className="numeric">Đơn giá</th><th className="numeric">Thành tiền</th></tr></thead><tbody>
-      {document.items.map((item) => <tr key={item.id}><td>{item.line_no}</td><td><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong>{item.product_code && item.vendor_product_code && <span>NCC: {item.vendor_product_code}</span>}</td><td className="mono">{item.barcode ?? "-"}</td><td><strong>{item.product_name ?? "-"}</strong>{item.model && <span>Model: {item.model}</span>}</td><td className="numeric"><strong>{formatDecimal(item.quantity)}</strong>{item.units_per_order_unit && item.units_per_order_unit !== "1" && <span>× {formatDecimal(item.units_per_order_unit)} / ĐVT</span>}</td><td><strong>{item.unit ?? "-"}</strong></td><td className="numeric money-cell">{formatMoney(item.unit_price, null)}</td><td className="numeric money-cell strong">{formatMoney(item.amount, null)}</td></tr>)}
-      {!document.items.length && <tr><td colSpan={8} className="empty-state">Chưa có dữ liệu</td></tr>}
+    <div className="detail-table-wrap"><table className={`product-table ${hasRowOrders ? "with-orders" : ""}`}><thead><tr><th>#</th>{hasRowOrders && <th>PO / Cửa hàng</th>}<th>Mã sản phẩm</th><th>Barcode</th><th>Tên sản phẩm</th><th className="numeric">Số lượng</th><th>Đơn vị</th><th className="numeric">Đơn giá</th><th className="numeric">Thành tiền</th></tr></thead><tbody>
+      {document.items.map((item) => <tr key={item.id}><td>{item.line_no}</td>{hasRowOrders && <td className="po-cell"><strong>{item.po_number ?? "-"}</strong><span>{item.store_name ?? item.store_code ?? "-"}</span></td>}<td><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong>{item.product_code && item.vendor_product_code && <span>NCC: {item.vendor_product_code}</span>}</td><td className="mono">{item.barcode ?? "-"}</td><td><strong>{item.product_name ?? "-"}</strong>{item.model && <span>Model: {item.model}</span>}</td><td className="numeric"><strong>{formatDecimal(item.quantity)}</strong>{item.units_per_order_unit && item.units_per_order_unit !== "1" && <span>× {formatDecimal(item.units_per_order_unit)} / ĐVT</span>}</td><td><strong>{item.unit ?? "-"}</strong></td><td className="numeric money-cell">{formatMoney(item.unit_price, null)}</td><td className="numeric money-cell strong">{formatMoney(item.amount, null)}</td></tr>)}
+      {!document.items.length && <tr><td colSpan={hasRowOrders ? 9 : 8} className="empty-state">Chưa có dữ liệu</td></tr>}
     </tbody></table></div>
     <div className="mobile-product-list">
       {document.items.map((item) => <article className="mobile-product" key={item.id}>
         <div className="mobile-product-title"><span>#{item.line_no}</span><strong>{item.product_name ?? item.model ?? "Chưa có tên sản phẩm"}</strong></div>
+        {hasRowOrders && <div className="mobile-product-order"><span>PO {item.po_number ?? "-"}</span><strong>{item.store_name ?? item.store_code ?? "-"}</strong></div>}
         <div className="mobile-product-keys"><div><span>Mã sản phẩm</span><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong></div><div><span>Barcode</span><strong>{item.barcode ?? "-"}</strong></div></div>
         <div className="mobile-product-values"><div><span>Số lượng</span><strong>{formatDecimal(item.quantity)}{item.units_per_order_unit && item.units_per_order_unit !== "1" ? ` × ${formatDecimal(item.units_per_order_unit)}` : ""}</strong></div><div><span>Đơn vị</span><strong>{item.unit ?? "-"}</strong></div><div><span>Đơn giá</span><strong>{formatMoney(item.unit_price, null)}</strong></div><div><span>Thành tiền</span><strong>{formatMoney(item.amount, null)}</strong></div></div>
       </article>)}
       {!document.items.length && <div className="empty-state">Chưa có dữ liệu</div>}
     </div>
-    {(["failed", "needs_review", "completed"] as Status[]).includes(document.status) && <div className="detail-footer"><button className="secondary-button" onClick={() => void onRetry(document.id)}><RotateCcw size={17} />{document.status === "completed" ? "OCR lại" : "Chạy lại OCR"}</button></div>}
+    {(["failed", "needs_review", "completed"] as Status[]).includes(document.status) && <div className="detail-footer">
+      {document.status === "needs_review" && <button type="button" className="primary-button" onClick={() => void onConfirm(document.id)}><CheckCircle2 size={17} />Xác nhận</button>}
+      <button type="button" className="secondary-button" onClick={() => void onRetry(document.id)}><RotateCcw size={17} />{document.status === "completed" ? "OCR lại" : "Chạy lại OCR"}</button>
+    </div>}
   </aside>;
 }
 
@@ -320,6 +357,10 @@ function formatDate(value: string | null) {
   return match ? `${match[3]}/${match[2]}/${match[1]}` : value;
 }
 
+function formatWarning(warning: string) {
+  return WARNING_TRANSLATIONS[warning.trim()] ?? warning;
+}
+
 function formatDecimal(value: string | null) {
   if (!value) return "-";
   return value.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
@@ -329,6 +370,6 @@ function formatMoney(value: string | null, currency: string | null) {
   if (!value) return "-";
   const number = Number(value);
   if (!Number.isFinite(number)) return value;
-  const formatted = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 6 }).format(number);
+  const formatted = VI_NUMBER_FORMAT.format(number);
   return currency ? `${formatted} ${currency}` : formatted;
 }

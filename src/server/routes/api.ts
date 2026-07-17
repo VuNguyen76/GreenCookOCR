@@ -8,6 +8,7 @@ import { fileTypeFromFile } from "file-type";
 import { z } from "zod";
 import { config } from "../config.js";
 import {
+  confirmDocument,
   createBatch,
   findDocumentByHash,
   getDocument,
@@ -100,6 +101,14 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     const { id } = IdParams.parse(request.params);
     if (!await retryDocument(id)) {
       return reply.code(409).send({ error: "Tài liệu không ở trạng thái có thể chạy lại" });
+    }
+    return { ok: true };
+  });
+
+  app.post("/api/documents/:id/confirm", async (request, reply) => {
+    const { id } = IdParams.parse(request.params);
+    if (!await confirmDocument(id)) {
+      return reply.code(409).send({ error: "Chỉ có thể xác nhận tài liệu đang cần kiểm tra" });
     }
     return { ok: true };
   });

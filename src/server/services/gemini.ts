@@ -15,6 +15,13 @@ import {
 import { config } from "../config.js";
 import type { PreparedInput } from "./preprocessor.js";
 import { OCR_PROMPT } from "./prompt.js";
+import {
+  AI_RECONCILIATION_JSON_SCHEMA,
+  AiReconciliationResponseSchema,
+  buildAiReconciliationPrompt,
+  type AiReconciliationDecision,
+  type AiReconciliationInput
+} from "./reconciliation.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,6 +39,36 @@ export class GeminiOcrService {
       return this.extractViaOpenAiCompatible(input, originalName);
     }
     return this.extractViaGemini(input, originalName);
+  }
+
+  async reconcileProducts(input: AiReconciliationInput): Promise<AiReconciliationDecision[]> {
+    const prompt = buildAiReconciliationPrompt(input);
+    if (config.ocrProvider === "openai-compatible") {
+      if (!config.openAiCompatibleApiKey) {
+        throw new Error("OPENAI_COMPATIBLE_API_KEY is not configured");
+      }
+      const raw = await this.createOpenAiCompatibleJson(
+        [{ type: "text", text: prompt }],
+        4_000
+      );
+      return AiReconciliationResponseSchema.parse(raw).decisions;
+    }
+
+    const interaction = await withTimeout(
+      this.client.interactions.create({
+        model: config.geminiModel,
+        input: [{ type: "text", text: prompt }] as never,
+        response_format: {
+          type: "text",
+          mime_type: "application/json",
+          schema: AI_RECONCILIATION_JSON_SCHEMA
+        }
+      }),
+      this.interactionTimeoutMs,
+      "Timed out waiting for Gemini reconciliation response"
+    );
+    if (!interaction.output_text) throw new Error("Gemini returned an empty reconciliation response");
+    return AiReconciliationResponseSchema.parse(JSON.parse(interaction.output_text)).decisions;
   }
 
   private async extractViaGemini(input: PreparedInput, originalName: string): Promise<GeminiExtraction> {
@@ -95,15 +132,18 @@ export class GeminiOcrService {
           type: "text",
           text: `${OCR_PROMPT}\n\nReturn exactly one JSON object matching the schema. Do not wrap it in markdown.`
         });
-        for (const imagePath of imagePaths) {
-          const image = await fs.readFile(imagePath);
-          content.push({
-            type: "image_url",
-            image_url: {
-              url: `data:image/png;base64,${image.toString("base64")}`
-            }
-          });
-        }
+        const imageParts = await Promise.all(
+          imagePaths.map(async (imagePath) => {
+            const image = await fs.readFile(imagePath);
+            return {
+              type: "image_url",
+              image_url: {
+                url: `data:image/png;base64,${image.toString("base64")}`
+              }
+            };
+          })
+        );
+        content.push(...imageParts);
       }
 
       const raw = await this.createOpenAiCompatibleInteraction(content);
@@ -136,6 +176,14 @@ export class GeminiOcrService {
   }
 
   private async createOpenAiCompatibleInteraction(content: Array<Record<string, unknown>>): Promise<OcrDocument> {
+    const raw = await this.createOpenAiCompatibleJson(content, 12_000);
+    return OcrDocumentSchema.parse(canonicalizeOcrDocument(raw));
+  }
+
+  private async createOpenAiCompatibleJson(
+    content: Array<Record<string, unknown>>,
+    maxTokens: number
+  ): Promise<unknown> {
     const response = await fetch(`${config.openAiCompatibleBaseUrl}/chat/completions`, {
       method: "POST",
       headers: {
@@ -146,17 +194,16 @@ export class GeminiOcrService {
         model: config.openAiCompatibleModel,
         messages: [{ role: "user", content }],
         temperature: 0,
-        max_tokens: 12_000
+        max_tokens: maxTokens
       }),
       signal: AbortSignal.timeout(this.interactionTimeoutMs)
     });
     const responseText = await response.text();
     if (!response.ok) {
-      throw new Error(`OpenAI-compatible OCR failed (${response.status}): ${responseText.slice(0, 1000)}`);
+      throw new Error(`OpenAI-compatible request failed (${response.status}): ${responseText.slice(0, 1000)}`);
     }
     const outputText = extractOpenAiCompatibleText(responseText);
-    const raw = JSON.parse(extractJsonObject(outputText));
-    return OcrDocumentSchema.parse(canonicalizeOcrDocument(raw));
+    return JSON.parse(extractJsonObject(outputText));
   }
 
   private async renderPdfPages(inputPath: string, temporaryPaths: string[]): Promise<string[]> {
@@ -219,7 +266,7 @@ function pageNumber(fileName: string): number {
   return Number(fileName.match(/-(\d+)\.png$/)?.[1] ?? 0);
 }
 
-function canonicalizeOcrDocument(value: unknown): Record<string, unknown> {
+export function canonicalizeOcrDocument(value: unknown): Record<string, unknown> {
   const source = isRecord(value) ? value : {};
   const items = Array.isArray(source.items) ? source.items : [];
   const templateKey = stringValue(source.template_key);
@@ -227,6 +274,8 @@ function canonicalizeOcrDocument(value: unknown): Record<string, unknown> {
     ?? stringValue(source.title)
     ?? stringValue(source.document_type)
     ?? "Purchase Order";
+  const orderedBy = firstLineString(source.ordered_by ?? source.order_by);
+  const bySupplier = firstLineString(source.by_supplier);
 
   return {
     schema_version: "1.0",
@@ -234,13 +283,17 @@ function canonicalizeOcrDocument(value: unknown): Record<string, unknown> {
     title_source: source.title_source === "document" ? "document" : "inferred",
     template_key: isTemplateKey(templateKey) ? templateKey : "unknown",
     document_type: isDocumentType(source.document_type) ? source.document_type : "purchase_order",
-    issuer_name: nullableString(source.issuer_name ?? source.issuer ?? source.buyer_name),
-    issuer_branch: nullableString(source.issuer_branch),
+    issuer_name: nullableString(
+      source.issuer_name ?? orderedBy ?? source.issuer ?? source.buyer_name
+    ),
+    issuer_branch: nullableString(source.issuer_branch ?? source.for_store),
     po_number: nullableString(source.po_number ?? source.order_number ?? source.order_no),
     po_date: nullableString(source.po_date ?? source.order_date),
     delivery_date: nullableString(source.delivery_date),
     currency: nullableString(source.currency ?? "VND"),
-    supplier_name: nullableString(source.supplier_name ?? source.supplier ?? source.vendor),
+    supplier_name: nullableString(
+      source.supplier_name ?? bySupplier ?? source.supplier ?? source.vendor
+    ),
     buyer_name: nullableString(source.buyer_name ?? source.buyer),
     delivery_address: nullableString(source.delivery_address ?? source.delivered_to),
     subtotal_amount: nullableNumberString(source.subtotal_amount ?? source.subtotal ?? source.total_before_tax),
@@ -256,6 +309,11 @@ function canonicalizeOcrItem(value: unknown, fallbackLineNo: number): Record<str
   const source = isRecord(value) ? value : {};
   return {
     line_no: positiveInteger(source.line_no) ?? fallbackLineNo,
+    po_number: nullableString(source.po_number ?? source.order_id ?? source.order_number),
+    po_date: nullableString(source.po_date ?? source.order_date),
+    store_code: nullableString(source.store_code ?? source.store_id),
+    store_name: nullableString(source.store_name),
+    delivery_address: nullableString(source.delivery_address ?? source.store_address),
     product_code: nullableString(source.product_code ?? source.article_code),
     vendor_product_code: nullableString(source.vendor_product_code),
     barcode: nullableString(source.barcode ?? source.article),
@@ -288,11 +346,26 @@ function nullableString(value: unknown): string | null {
   return stringValue(value);
 }
 
+function firstLineString(value: unknown): string | null {
+  const text = stringValue(value);
+  return text?.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+}
+
 function nullableNumberString(value: unknown): string | null {
   const text = stringValue(value);
   if (!text) return null;
-  const normalized = text.replace(/[,\s]/g, "").replace(/\.(?=\d{3}(?:\D|$))/g, "");
-  return /^-?\d+(?:\.\d+)?$/.test(normalized) ? normalized : null;
+  let cleaned = text.replace(/[^0-9,.-]/g, "").trim();
+  if (!cleaned) return null;
+  if (/^-?\d+(?:\.\d+)?$/.test(cleaned)) return cleaned;
+  if (/^-?\d{1,3}(?:[.,]\d{3})+$/.test(cleaned)) return cleaned.replace(/[.,]/g, "");
+  if (cleaned.includes(",") && cleaned.includes(".")) {
+    const decimalMark = cleaned.lastIndexOf(",") > cleaned.lastIndexOf(".") ? "," : ".";
+    const thousandsMark = decimalMark === "," ? "." : ",";
+    cleaned = cleaned.replaceAll(thousandsMark, "").replace(decimalMark, ".");
+  } else {
+    cleaned = cleaned.replace(",", ".");
+  }
+  return /^-?\d+(?:\.\d+)?$/.test(cleaned) ? cleaned : null;
 }
 
 function positiveInteger(value: unknown): number | null {
@@ -302,7 +375,7 @@ function positiveInteger(value: unknown): number | null {
 
 function confidenceValue(value: unknown): number {
   const numberValue = Number(value);
-  if (!Number.isFinite(numberValue)) return 0.75;
+  if (!Number.isFinite(numberValue)) return 0.5;
   return Math.min(1, Math.max(0, numberValue));
 }
 

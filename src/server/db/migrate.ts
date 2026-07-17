@@ -53,6 +53,11 @@ export async function migrate(): Promise<void> {
       id uuid PRIMARY KEY,
       document_id uuid NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE,
       line_no integer NOT NULL,
+      po_number text,
+      po_date date,
+      store_code text,
+      store_name text,
+      delivery_address text,
       product_code text,
       vendor_product_code text,
       barcode varchar(64),
@@ -88,10 +93,75 @@ export async function migrate(): Promise<void> {
       completed_at timestamptz
     );
 
+    CREATE TABLE IF NOT EXISTS product_references (
+      id uuid PRIMARY KEY,
+      reference_key text NOT NULL UNIQUE,
+      barcode varchar(64),
+      product_codes text[] NOT NULL DEFAULT ARRAY[]::text[],
+      vendor_product_codes text[] NOT NULL DEFAULT ARRAY[]::text[],
+      canonical_name text NOT NULL,
+      name_aliases text[] NOT NULL DEFAULT ARRAY[]::text[],
+      units text[] NOT NULL DEFAULT ARRAY[]::text[],
+      template_keys text[] NOT NULL DEFAULT ARRAY[]::text[],
+      issuer_names text[] NOT NULL DEFAULT ARRAY[]::text[],
+      source_count integer NOT NULL DEFAULT 1 CHECK (source_count > 0),
+      confidence numeric(5, 4) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+      verified boolean NOT NULL DEFAULT false,
+      active boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_product_references_barcode
+      ON product_references(barcode) WHERE barcode IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_product_references_product_codes
+      ON product_references USING gin(product_codes);
+    CREATE INDEX IF NOT EXISTS idx_product_references_vendor_codes
+      ON product_references USING gin(vendor_product_codes);
+
+    CREATE TABLE IF NOT EXISTS product_reference_evidence (
+      id uuid PRIMARY KEY,
+      reference_id uuid NOT NULL REFERENCES product_references(id) ON DELETE CASCADE,
+      document_id uuid NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE,
+      line_no integer NOT NULL,
+      source_kind text NOT NULL,
+      observed_item jsonb NOT NULL,
+      confidence numeric(5, 4) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (document_id, line_no)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_product_reference_evidence_reference
+      ON product_reference_evidence(reference_id);
+
     ALTER TABLE ocr_documents ADD COLUMN IF NOT EXISTS subtotal_amount numeric(24, 6);
     ALTER TABLE ocr_documents ADD COLUMN IF NOT EXISTS tax_amount numeric(24, 6);
     ALTER TABLE ocr_documents ADD COLUMN IF NOT EXISTS total_amount numeric(24, 6);
+    ALTER TABLE ocr_documents ADD COLUMN IF NOT EXISTS normalized_ocr_result jsonb;
+    ALTER TABLE ocr_documents ADD COLUMN IF NOT EXISTS reconciliation_result jsonb;
+    ALTER TABLE ocr_documents ADD COLUMN IF NOT EXISTS reconciliation_version text;
     ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS units_per_order_unit numeric(24, 6);
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS po_number text;
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS po_date date;
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS store_code text;
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS store_name text;
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS delivery_address text;
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS matched_reference_id uuid REFERENCES product_references(id);
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS match_method text;
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS match_confidence numeric(5, 4);
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS field_sources jsonb NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS reconciliation_warnings jsonb NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE ocr_items ADD COLUMN IF NOT EXISTS reconciled_by_ai boolean NOT NULL DEFAULT false;
+
+    UPDATE product_reference_evidence e
+    SET observed_item = e.observed_item || '{"product_code":null,"vendor_product_code":null}'::jsonb
+    FROM ocr_documents d
+    WHERE d.id = e.document_id
+      AND d.template_key IN ('po_bigc_go_purchase_note', 'po_wincommerce_purchase_order')
+      AND (
+        e.observed_item->>'product_code' IS NOT NULL
+        OR e.observed_item->>'vendor_product_code' IS NOT NULL
+      );
   `);
 }
 

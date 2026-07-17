@@ -12,6 +12,8 @@ import { GeminiOcrService } from "./gemini.js";
 import { normalizeOcrResult } from "./normalizer.js";
 import { cleanupPreparedInput, prepareDocument } from "./preprocessor.js";
 import { PROMPT_VERSION } from "./prompt.js";
+import { createSourceOnlyReconciliation } from "./reconciliation.js";
+import { extractStructuredSpreadsheet } from "./structured-extractor.js";
 
 export class SequentialOcrWorker {
   private running = false;
@@ -43,23 +45,35 @@ export class SequentialOcrWorker {
       if (!document) return;
 
       const started = Date.now();
-      const runId = await createRun(document.id, config.geminiModel, PROMPT_VERSION);
+      const model = config.ocrProvider === "openai-compatible"
+        ? config.openAiCompatibleModel
+        : config.geminiModel;
+      const runId = await createRun(document.id, model, PROMPT_VERSION);
       let prepared: Awaited<ReturnType<typeof prepareDocument>> | undefined;
       try {
         prepared = await prepareDocument(document);
         await setDocumentStatus(document.id, "ocr_running");
-        const extraction = await this.gemini.extract(prepared, document.original_name);
+        const structured = prepared.mode === "text"
+          ? extractStructuredSpreadsheet(prepared.text, document.original_name)
+          : null;
+        const extraction = structured
+          ? { raw: structured, interactionId: undefined }
+          : await this.gemini.extract(prepared, document.original_name);
         await setDocumentStatus(document.id, "validating");
-        const normalized = normalizeOcrResult(extraction.raw);
+        const normalizedOcr = normalizeOcrResult(extraction.raw);
+        const reconciliation = createSourceOnlyReconciliation(normalizedOcr);
         await completeDocument(
           document.id,
           extraction.raw,
-          normalized,
-          config.geminiModel,
+          normalizedOcr,
+          reconciliation,
+          model,
           PROMPT_VERSION
         );
         await finishRun(runId, "completed", Date.now() - started, extraction.interactionId);
-        console.log(`OCR completed: ${document.original_name} (${normalized.items.length} items)`);
+        console.log(
+          `OCR completed: ${document.original_name} (${reconciliation.document.items.length} items, source-only normalization)`
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await failDocument(document.id, document.attempts, error);

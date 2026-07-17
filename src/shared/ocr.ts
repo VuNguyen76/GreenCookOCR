@@ -15,9 +15,15 @@ export const TEMPLATE_KEYS = [
 
 const nullableText = z.string().nullable();
 const nullableNumberText = z.string().regex(/^-?\d+(?:\.\d+)?$/).nullable();
+const nullableItemText = nullableText.default(null);
 
 export const OcrItemSchema = z.object({
   line_no: z.number().int().positive(),
+  po_number: nullableItemText,
+  po_date: nullableItemText,
+  store_code: nullableItemText,
+  store_name: nullableItemText,
+  delivery_address: nullableItemText,
   product_code: nullableText,
   vendor_product_code: nullableText,
   barcode: nullableText,
@@ -102,6 +108,11 @@ export const OCR_JSON_SCHEMA = {
         additionalProperties: false,
         properties: {
           line_no: { type: "integer", minimum: 1 },
+          po_number: nullableStringSchema,
+          po_date: nullableStringSchema,
+          store_code: nullableStringSchema,
+          store_name: nullableStringSchema,
+          delivery_address: nullableStringSchema,
           product_code: nullableStringSchema,
           vendor_product_code: nullableStringSchema,
           barcode: nullableStringSchema,
@@ -119,7 +130,8 @@ export const OCR_JSON_SCHEMA = {
           confidence: { type: "number", minimum: 0, maximum: 1 }
         },
         required: [
-          "line_no", "product_code", "vendor_product_code", "barcode",
+          "line_no", "po_number", "po_date", "store_code", "store_name", "delivery_address",
+          "product_code", "vendor_product_code", "barcode",
           "product_name", "model", "quantity", "units_per_order_unit", "unit", "unit_price",
           "vat_rate", "amount", "source_page", "confidence"
         ]

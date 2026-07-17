@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { OcrDocument, DocumentRow } from "../../shared/ocr.js";
+import type { DocumentRow, DocumentStatus, OcrDocument } from "../../shared/ocr.js";
+import type { ReconciliationResult } from "../services/reconciliation.js";
 import { config } from "../config.js";
 import { pool } from "./pool.js";
 
@@ -157,26 +158,49 @@ export async function setDocumentStatus(
 export async function completeDocument(
   id: string,
   rawResult: unknown,
-  normalized: OcrDocument,
+  normalizedOcr: OcrDocument,
+  reconciliation: ReconciliationResult,
   model: string,
   promptVersion: string
-): Promise<void> {
+): Promise<DocumentStatus> {
+  const normalized = reconciliation.document;
+  const status: DocumentStatus =
+    normalized.confidence < 0.8 || normalized.template_key === "unknown" || normalized.warnings.length > 0
+      ? "needs_review"
+      : "completed";
+  const auditsByLine = new Map(reconciliation.lines.map((line) => [line.lineNo, line]));
+  const rawItems = getRawItems(rawResult);
   const client = await pool.connect();
   try {
     await client.query("begin");
     await client.query("delete from ocr_items where document_id = $1", [id]);
-    for (const item of normalized.items) {
+    for (const [index, item] of normalized.items.entries()) {
+      const audit = auditsByLine.get(item.line_no);
       await client.query(
         `insert into ocr_items(
-          id, document_id, line_no, product_code, vendor_product_code, barcode,
-          product_name, model, quantity, units_per_order_unit, unit, unit_price,
-          vat_rate, amount, source_page, confidence, raw_row
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+          id, document_id, line_no, po_number, po_date, store_code, store_name,
+          delivery_address, product_code, vendor_product_code, barcode, product_name,
+          model, quantity, units_per_order_unit, unit, unit_price, vat_rate, amount,
+          source_page, confidence, raw_row, matched_reference_id,
+          match_method, match_confidence, field_sources, reconciliation_warnings,
+          reconciled_by_ai
+        ) values (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+          $19,$20,$21,$22,$23,$24,$25,$26,$27,$28
+        )`,
         [
-          randomUUID(), id, item.line_no, item.product_code, item.vendor_product_code,
-          item.barcode, item.product_name, item.model, item.quantity,
-          item.units_per_order_unit, item.unit, item.unit_price, item.vat_rate,
-          item.amount, item.source_page, item.confidence, JSON.stringify(item)
+          randomUUID(), id, item.line_no, item.po_number, item.po_date, item.store_code,
+          item.store_name, item.delivery_address, item.product_code,
+          item.vendor_product_code, item.barcode, item.product_name, item.model,
+          item.quantity, item.units_per_order_unit, item.unit, item.unit_price,
+          item.vat_rate, item.amount, item.source_page, item.confidence,
+          JSON.stringify(rawItems[index] ?? item),
+          audit?.matchedReferenceId ?? null,
+          audit?.matchMethod ?? "none",
+          audit?.matchConfidence ?? item.confidence,
+          JSON.stringify(audit?.fieldSources ?? {}),
+          JSON.stringify(audit?.warnings ?? []),
+          audit?.reconciledByAi ?? false
         ]
       );
     }
@@ -185,15 +209,15 @@ export async function completeDocument(
         status = $2, document_title = $3, template_key = $4, issuer_name = $5,
         po_number = $6, po_date = $7, delivery_date = $8, currency = $9,
         supplier_name = $10, subtotal_amount = $11, tax_amount = $12,
-        total_amount = $13, raw_result = $14, normalized_result = $15,
-        warnings = $16, model = $17, prompt_version = $18,
+        total_amount = $13, raw_result = $14, normalized_ocr_result = $15,
+        normalized_result = $16, reconciliation_result = $17,
+        reconciliation_version = $18, warnings = $19, model = $20,
+        prompt_version = $21,
         error_message = null, completed_at = now(), updated_at = now()
        where id = $1`,
       [
         id,
-        normalized.confidence < 0.8 || normalized.template_key === "unknown"
-          ? "needs_review"
-          : "completed",
+        status,
         normalized.document_title,
         normalized.template_key,
         normalized.issuer_name,
@@ -206,19 +230,33 @@ export async function completeDocument(
         normalized.tax_amount,
         normalized.total_amount,
         JSON.stringify(rawResult),
+        JSON.stringify(normalizedOcr),
         JSON.stringify(normalized),
+        JSON.stringify({
+          version: reconciliation.version,
+          usedAi: reconciliation.usedAi,
+          lines: reconciliation.lines
+        }),
+        reconciliation.version,
         JSON.stringify(normalized.warnings),
         model,
         promptVersion
       ]
     );
     await client.query("commit");
+    return status;
   } catch (error) {
     await client.query("rollback");
     throw error;
   } finally {
     client.release();
   }
+}
+
+function getRawItems(rawResult: unknown): unknown[] {
+  if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) return [];
+  const items = (rawResult as Record<string, unknown>).items;
+  return Array.isArray(items) ? items : [];
 }
 
 export async function failDocument(id: string, attempts: number, error: unknown): Promise<void> {
@@ -267,6 +305,21 @@ export async function retryDocument(id: string): Promise<boolean> {
   } finally {
     client.release();
   }
+}
+
+export async function confirmDocument(id: string): Promise<boolean> {
+  const result = await pool.query(
+    `update ocr_documents set
+      status = 'completed',
+      warnings = '[]'::jsonb,
+      error_message = null,
+      completed_at = coalesce(completed_at, now()),
+      updated_at = now()
+     where id = $1 and status = 'needs_review'
+     returning id`,
+    [id]
+  );
+  return Boolean(result.rowCount);
 }
 
 export async function createRun(documentId: string, model: string, promptVersion: string): Promise<string> {

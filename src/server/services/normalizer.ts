@@ -4,7 +4,10 @@ import { OcrDocumentSchema } from "../../shared/ocr.js";
 
 export function normalizeOcrResult(raw: unknown): OcrDocument {
   const parsed = OcrDocumentSchema.parse(raw);
-  const warnings = new Set(parsed.warnings.map(cleanText).filter(Boolean));
+  const warnings = new Set(parsed.warnings.flatMap((warning) => {
+    const cleaned = normalizeWarningMessage(warning);
+    return cleaned ? [cleaned] : [];
+  }));
   const seenLines = new Set<number>();
 
   const items = parsed.items.map((source, index) => {
@@ -13,7 +16,8 @@ export function normalizeOcrResult(raw: unknown): OcrDocument {
     seenLines.add(item.line_no);
 
     applyTemplateRules(parsed.template_key, item, source);
-    completeItemAmounts(item, warnings);
+    completeItemAmounts(parsed.template_key, item, warnings);
+    item.confidence = calibratedItemConfidence(item, source.confidence, parsed.template_key);
     if (item.barcode && !isLikelyBarcode(item.barcode)) {
       warnings.add(`Barcode cần kiểm tra ở dòng ${item.line_no}: ${item.barcode}`);
     }
@@ -23,43 +27,90 @@ export function normalizeOcrResult(raw: unknown): OcrDocument {
     return item;
   });
 
+  if (parsed.template_key === "po_dmx_excel_order_export" && hasCompleteRowPoData(items)) {
+    for (const warning of warnings) {
+      if (isExpectedDmxExportNotice(warning)) warnings.delete(warning);
+    }
+  }
+  if (parsed.template_key === "po_dmx_pdf_customer_manual") {
+    for (const warning of warnings) {
+      if (isIncorrectDmxProductIdNotice(warning)) warnings.delete(warning);
+    }
+  }
+
   const derivedSubtotal = sumItemAmounts(items);
   let subtotalAmount = normalizeNumeric(parsed.subtotal_amount);
   let taxAmount = normalizeNumeric(parsed.tax_amount);
   let totalAmount = normalizeNumeric(parsed.total_amount);
 
-  if (!subtotalAmount && derivedSubtotal) subtotalAmount = derivedSubtotal;
-  if (subtotalAmount && derivedSubtotal && decimalsDiffer(subtotalAmount, derivedSubtotal)) {
-    warnings.add(`Tổng thành tiền các dòng (${derivedSubtotal}) lệch tổng tiền hàng trên chứng từ (${subtotalAmount})`);
+  if (parsed.template_key === "po_dmx_pdf_customer_manual") {
+    const derivedBeforeTax = sumItemAmountsBeforeVat(items);
+    if (derivedBeforeTax) subtotalAmount = derivedBeforeTax;
+    if (!totalAmount && derivedSubtotal) totalAmount = derivedSubtotal;
+    if (totalAmount && derivedSubtotal && decimalsDiffer(totalAmount, derivedSubtotal)) {
+      warnings.add(`Tổng Cost các dòng (${derivedSubtotal}) lệch tổng thanh toán trên chứng từ (${totalAmount})`);
+    }
+    if (subtotalAmount && totalAmount) {
+      const derivedTax = new Decimal(totalAmount).minus(subtotalAmount);
+      if (derivedTax.greaterThanOrEqualTo(0)) taxAmount = decimalText(derivedTax);
+    }
+  } else {
+    if (!subtotalAmount && derivedSubtotal) subtotalAmount = derivedSubtotal;
+    if (subtotalAmount && derivedSubtotal && decimalsDiffer(subtotalAmount, derivedSubtotal)) {
+      warnings.add(`Tổng thành tiền các dòng (${derivedSubtotal}) lệch tổng tiền hàng trên chứng từ (${subtotalAmount})`);
+    }
+    if (!taxAmount && subtotalAmount && totalAmount) {
+      const derivedTax = new Decimal(totalAmount).minus(subtotalAmount);
+      if (derivedTax.greaterThanOrEqualTo(0)) taxAmount = decimalText(derivedTax);
+    }
+    if (!totalAmount && subtotalAmount) {
+      totalAmount = taxAmount
+        ? decimalText(new Decimal(subtotalAmount).plus(taxAmount))
+        : subtotalAmount;
+      if (parsed.template_key !== "po_dmx_excel_order_export") {
+        warnings.add("Tổng đơn hàng được tính từ các dòng sản phẩm vì chứng từ không có tổng thanh toán rõ ràng");
+      }
+    }
   }
-  if (!taxAmount && subtotalAmount && totalAmount) {
-    const derivedTax = new Decimal(totalAmount).minus(subtotalAmount);
-    if (derivedTax.greaterThanOrEqualTo(0)) taxAmount = decimalText(derivedTax);
-  }
-  if (!totalAmount && subtotalAmount) {
-    totalAmount = taxAmount
-      ? decimalText(new Decimal(subtotalAmount).plus(taxAmount))
-      : subtotalAmount;
-    warnings.add("Tổng đơn hàng được tính từ các dòng sản phẩm vì chứng từ không có tổng thanh toán rõ ràng");
-  }
+
+  const buyerName = cleanNullable(parsed.buyer_name);
+  const issuerName = cleanNullable(parsed.issuer_name)
+    ?? (parsed.template_key === "po_bigc_go_purchase_note" ? buyerName : null);
+  const documentTitle = cleanText(parsed.document_title) || "Không xác định";
+  const poNumber = cleanIdentifier(parsed.po_number);
+  const poDate = normalizeDate(parsed.po_date);
+  const deliveryDate = normalizeDate(parsed.delivery_date);
+  const confidence = calibratedDocumentConfidence({
+    source: parsed,
+    items,
+    documentTitle,
+    issuerName,
+    poNumber,
+    poDate,
+    deliveryDate,
+    subtotalAmount,
+    taxAmount,
+    totalAmount
+  });
 
   return {
     ...parsed,
-    document_title: cleanText(parsed.document_title) || "Không xác định",
-    issuer_name: cleanNullable(parsed.issuer_name),
+    document_title: documentTitle,
+    issuer_name: issuerName,
     issuer_branch: cleanNullable(parsed.issuer_branch),
-    po_number: cleanIdentifier(parsed.po_number),
-    po_date: normalizeDate(parsed.po_date),
-    delivery_date: normalizeDate(parsed.delivery_date),
+    po_number: poNumber,
+    po_date: poDate,
+    delivery_date: deliveryDate,
     currency: cleanNullable(parsed.currency)?.toUpperCase() ?? null,
     supplier_name: cleanNullable(parsed.supplier_name),
-    buyer_name: cleanNullable(parsed.buyer_name),
+    buyer_name: buyerName,
     delivery_address: cleanNullable(parsed.delivery_address),
     subtotal_amount: subtotalAmount,
     tax_amount: taxAmount,
     total_amount: totalAmount,
     items,
-    warnings: [...warnings]
+    warnings: [...warnings],
+    confidence
   };
 }
 
@@ -67,10 +118,15 @@ function normalizeItem(source: OcrItem, fallbackLine: number): OcrItem {
   return {
     ...source,
     line_no: source.line_no > 0 ? source.line_no : fallbackLine,
+    po_number: cleanIdentifier(source.po_number),
+    po_date: normalizeDate(source.po_date),
+    store_code: cleanIdentifier(source.store_code),
+    store_name: cleanNullable(source.store_name),
+    delivery_address: cleanNullable(source.delivery_address),
     product_code: cleanIdentifier(source.product_code),
     vendor_product_code: cleanIdentifier(source.vendor_product_code),
     barcode: normalizeBarcode(source.barcode),
-    product_name: cleanNullable(source.product_name),
+    product_name: cleanProductName(source.product_name),
     model: cleanIdentifier(source.model),
     quantity: normalizeNumeric(source.quantity),
     units_per_order_unit: normalizeNumeric(source.units_per_order_unit),
@@ -82,26 +138,138 @@ function normalizeItem(source: OcrItem, fallbackLine: number): OcrItem {
   };
 }
 
-function completeItemAmounts(item: OcrItem, warnings: Set<string>): void {
+function completeItemAmounts(
+  template: OcrDocument["template_key"],
+  item: OcrItem,
+  warnings: Set<string>
+): void {
   if (!item.quantity) return;
   const multiplier = new Decimal(item.quantity).times(item.units_per_order_unit ?? "1");
   if (multiplier.isZero()) return;
+  const priceMultiplier = template === "po_dmx_pdf_customer_manual" && item.vat_rate
+    ? new Decimal(1).plus(new Decimal(item.vat_rate).dividedBy(100))
+    : new Decimal(1);
+  const amountMultiplier = multiplier.times(priceMultiplier);
 
   if (!item.amount && item.unit_price) {
-    item.amount = decimalText(multiplier.times(item.unit_price));
+    item.amount = decimalText(amountMultiplier.times(item.unit_price));
   } else if (!item.unit_price && item.amount) {
-    item.unit_price = decimalText(new Decimal(item.amount).dividedBy(multiplier));
+    item.unit_price = decimalText(new Decimal(item.amount).dividedBy(amountMultiplier));
   } else if (item.unit_price && item.amount) {
-    const calculated = decimalText(multiplier.times(item.unit_price));
+    const calculated = decimalText(amountMultiplier.times(item.unit_price));
     if (decimalsDiffer(calculated, item.amount)) {
-      warnings.add(`Thành tiền dòng ${item.line_no} (${item.amount}) không khớp số lượng × quy đổi × đơn giá (${calculated})`);
+      const formula = template === "po_dmx_pdf_customer_manual"
+        ? "số lượng × đơn giá × (1 + VAT)"
+        : "số lượng × quy đổi × đơn giá";
+      warnings.add(`Thành tiền dòng ${item.line_no} (${item.amount}) không khớp ${formula} (${calculated})`);
     }
   }
+}
+
+function calibratedItemConfidence(
+  item: OcrItem,
+  modelConfidence: number,
+  template: OcrDocument["template_key"]
+): number {
+  let validationScore = 0;
+  const hasIdentifier = Boolean(
+    (item.barcode && isLikelyBarcode(item.barcode))
+    || item.product_code
+    || item.vendor_product_code
+  );
+  if (hasIdentifier) validationScore += 0.25;
+  if (item.product_name) validationScore += 0.15;
+  if (isPositiveNumber(item.quantity)) validationScore += 0.1;
+  if (item.unit) validationScore += 0.05;
+  if (isNonNegativeNumber(item.unit_price)) validationScore += 0.1;
+  if (isNonNegativeNumber(item.amount)) validationScore += 0.1;
+  if (itemAmountsMatch(item, template)) validationScore += 0.2;
+  if (item.source_page) validationScore += 0.05;
+
+  const boundedModelConfidence = Math.max(0, Math.min(1, modelConfidence));
+  return roundConfidence(boundedModelConfidence * 0.1 + validationScore * 0.9);
+}
+
+function calibratedDocumentConfidence(input: {
+  source: OcrDocument;
+  items: OcrItem[];
+  documentTitle: string;
+  issuerName: string | null;
+  poNumber: string | null;
+  poDate: string | null;
+  deliveryDate: string | null;
+  subtotalAmount: string | null;
+  taxAmount: string | null;
+  totalAmount: string | null;
+}): number {
+  let validationScore = 0;
+  if (input.source.template_key !== "unknown") validationScore += 0.1;
+  if (input.documentTitle && input.documentTitle !== "Không xác định") validationScore += 0.05;
+  if (input.poNumber || hasCompleteRowPoData(input.items)) validationScore += 0.15;
+  if (input.poDate) validationScore += 0.1;
+  if (input.deliveryDate) validationScore += 0.05;
+  if (input.issuerName) validationScore += 0.05;
+  if (input.items.length > 0) {
+    validationScore += 0.1;
+    const averageItemConfidence = input.items.reduce((sum, item) => sum + item.confidence, 0)
+      / input.items.length;
+    validationScore += averageItemConfidence * 0.25;
+  }
+  if (input.subtotalAmount) validationScore += 0.05;
+  if (input.totalAmount) validationScore += 0.05;
+  if (documentTotalsMatch(input.subtotalAmount, input.taxAmount, input.totalAmount)) {
+    validationScore += 0.05;
+  }
+
+  return roundConfidence(input.source.confidence * 0.1 + validationScore * 0.9);
+}
+
+function documentTotalsMatch(
+  subtotalAmount: string | null,
+  taxAmount: string | null,
+  totalAmount: string | null
+): boolean {
+  if (!subtotalAmount || !totalAmount) return false;
+  const expected = new Decimal(subtotalAmount).plus(taxAmount ?? "0");
+  return !decimalsDiffer(decimalText(expected), totalAmount);
+}
+
+function roundConfidence(value: number): number {
+  return Math.round(Math.max(0, Math.min(1, value)) * 10_000) / 10_000;
+}
+
+function itemAmountsMatch(item: OcrItem, template: OcrDocument["template_key"]): boolean {
+  if (!item.quantity || !item.unit_price || !item.amount) return false;
+  let expected = new Decimal(item.quantity)
+    .times(item.units_per_order_unit ?? "1")
+    .times(item.unit_price);
+  if (template === "po_dmx_pdf_customer_manual" && item.vat_rate) {
+    expected = expected.times(new Decimal(1).plus(new Decimal(item.vat_rate).dividedBy(100)));
+  }
+  return !decimalsDiffer(decimalText(expected), item.amount);
+}
+
+function isPositiveNumber(value: string | null): boolean {
+  return Boolean(value && new Decimal(value).greaterThan(0));
+}
+
+function isNonNegativeNumber(value: string | null): boolean {
+  return Boolean(value && new Decimal(value).greaterThanOrEqualTo(0));
 }
 
 function sumItemAmounts(items: OcrItem[]): string | null {
   if (!items.length || items.some((item) => !item.amount)) return null;
   return decimalText(items.reduce((sum, item) => sum.plus(item.amount!), new Decimal(0)));
+}
+
+function sumItemAmountsBeforeVat(items: OcrItem[]): string | null {
+  if (!items.length || items.some((item) => !item.quantity || !item.unit_price)) return null;
+  const total = items.reduce((sum, item) => sum.plus(
+    new Decimal(item.quantity!)
+      .times(item.units_per_order_unit ?? "1")
+      .times(item.unit_price!)
+  ), new Decimal(0));
+  return decimalText(total);
 }
 
 function decimalsDiffer(left: string, right: string): boolean {
@@ -124,11 +292,50 @@ function applyTemplateRules(template: OcrDocument["template_key"], item: OcrItem
     item.vendor_product_code = item.barcode;
     item.barcode = null;
   }
+  if (
+    template === "po_dmx_pdf_customer_manual"
+    && item.barcode
+    && item.product_code
+    && normalizeBarcode(item.product_code) === item.barcode
+  ) {
+    item.barcode = null;
+  }
+  if (
+    template === "po_dmx_excel_order_export"
+    && item.barcode
+    && (!item.vendor_product_code || item.barcode === item.vendor_product_code)
+  ) {
+    item.vendor_product_code ??= item.barcode;
+    item.barcode = null;
+  }
   const rawMenaCode = cleanIdentifier(source.barcode);
   if (template === "po_mena_gourmet_purchase_order" && !item.product_code && rawMenaCode && /^M/i.test(rawMenaCode)) {
     item.product_code = rawMenaCode;
     item.barcode = null;
   }
+}
+
+function hasCompleteRowPoData(items: OcrItem[]): boolean {
+  if (!items.length || items.some((item) => !item.po_number)) return false;
+  return new Set(items.map((item) => item.po_number)).size > 1;
+}
+
+function isExpectedDmxExportNotice(warning: string): boolean {
+  return /multiple\s+po\s+numbers?/i.test(warning)
+    || /line\s+item\s+amounts?\s+were\s+calculated/i.test(warning)
+    || /total\s+fields?.*(?:set\s+to\s+null|not\s+present)/i.test(warning);
+}
+
+function isIncorrectDmxProductIdNotice(warning: string): boolean {
+  return /product\s+ids?.*check\s+digits?.*barcode/i.test(warning);
+}
+
+function normalizeWarningMessage(warning: string): string {
+  const cleaned = cleanText(warning);
+  if (/^total_amount is calculated as subtotal_amount \+ tax_amount because the grand total after tax was not explicitly printed on the document\.?$/i.test(cleaned)) {
+    return "Tổng đơn hàng được tính bằng tiền hàng cộng thuế vì chứng từ không in rõ tổng thanh toán sau thuế.";
+  }
+  return cleaned;
 }
 
 function cleanText(value: string): string {
@@ -138,6 +345,15 @@ function cleanText(value: string): string {
 function cleanNullable(value: string | null): string | null {
   if (value === null) return null;
   return cleanText(value) || null;
+}
+
+function cleanProductName(value: string | null): string | null {
+  const cleaned = cleanNullable(value);
+  if (!cleaned) return null;
+  return cleaned
+    .replace(/^pack\s+/i, "")
+    .replace(/\s+pack$/i, "")
+    .trim() || null;
 }
 
 function cleanIdentifier(value: string | null): string | null {
@@ -154,7 +370,7 @@ function normalizeBarcode(value: string | null): string | null {
 function normalizeNumeric(value: string | null): string | null {
   if (!value) return null;
   let cleaned = value.trim().replace(/\s+/g, "");
-  if (/^-?\d+(?:\.\d+)?$/.test(cleaned)) return cleaned;
+  if (/^-?\d+(?:\.\d+)?$/.test(cleaned)) return decimalText(new Decimal(cleaned));
   if (/^-?\d{1,3}(?:[.,]\d{3})+$/.test(cleaned)) {
     return cleaned.replace(/[.,]/g, "");
   }
@@ -165,7 +381,7 @@ function normalizeNumeric(value: string | null): string | null {
   } else {
     cleaned = cleaned.replace(",", ".");
   }
-  return /^-?\d+(?:\.\d+)?$/.test(cleaned) ? cleaned : null;
+  return /^-?\d+(?:\.\d+)?$/.test(cleaned) ? decimalText(new Decimal(cleaned)) : null;
 }
 
 function normalizeDate(value: string | null): string | null {
@@ -179,5 +395,17 @@ function normalizeDate(value: string | null): string | null {
 }
 
 function isLikelyBarcode(value: string): boolean {
-  return /^\d{8}$|^\d{12,14}$/.test(value);
+  if (!/^\d{8}$|^\d{12,14}$/.test(value)) return false;
+  return hasValidGs1CheckDigit(value);
+}
+
+function hasValidGs1CheckDigit(value: string): boolean {
+  const digits = [...value].map(Number);
+  const checkDigit = digits.pop();
+  if (checkDigit === undefined) return false;
+  let sum = 0;
+  for (let index = digits.length - 1, weight = 3; index >= 0; index -= 1, weight = weight === 3 ? 1 : 3) {
+    sum += digits[index] * weight;
+  }
+  return (10 - (sum % 10)) % 10 === checkDigit;
 }
