@@ -156,6 +156,9 @@ export type DocumentStatus =
   | "validating"
   | "completed"
   | "needs_review"
+  | "publishing"
+  | "published"
+  | "publish_failed"
   | "failed";
 
 export interface DocumentRow {

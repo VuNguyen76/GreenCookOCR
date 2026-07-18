@@ -13,6 +13,10 @@
     "build:web": "vite build",
     "start": "node dist-server/index.js",
     "db:migrate": "tsx src/server/db/migrate.ts",
+    "idempiere:migrate": "tsx scripts/migrate-idempiere.ts",
+    "idempiere:verify": "tsx scripts/verify-idempiere.ts",
+    "idempiere:verify-publisher": "tsx scripts/verify-publisher.ts",
+    "staging:import-postgres": "tsx scripts/import-postgres-staging.ts",
     "db:check": "tsx scripts/check-db.ts",
     "ocr:sample": "tsx scripts/ocr-sample.ts",
     "e2e:sample": "tsx scripts/e2e-upload.ts",
@@ -23,6 +27,7 @@
     "@fastify/multipart": "^10.1.0",
     "@fastify/static": "^10.1.0",
     "@google/genai": "^2.12.0",
+    "better-sqlite3": "^12.11.1",
     "decimal.js": "^10.6.0",
     "dotenv": "^17.4.2",
     "fast-xml-parser": "^5.10.0",
@@ -38,6 +43,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.1.1",
     "@types/pg": "^8.20.0",
     "@types/react": "^19.2.17",

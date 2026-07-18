@@ -7,9 +7,11 @@ import {
   FileText,
   Image as ImageIcon,
   LoaderCircle,
+  Link2,
   RefreshCw,
   RotateCcw,
   ScanLine,
+  Search,
   Trash2,
   Upload,
   X
@@ -17,7 +19,15 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { localizeOcrWarning } from "../shared/warning-messages.js";
 
-type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "completed" | "needs_review" | "failed";
+type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "completed" | "needs_review" | "failed" | "publishing" | "published" | "publish_failed";
+
+interface CatalogEntry {
+  id: string;
+  value: string;
+  name: string;
+  barcode?: string | null;
+  productCode?: string | null;
+}
 
 interface DocumentSummary {
   id: string;
@@ -46,6 +56,9 @@ interface DocumentDetail extends DocumentSummary {
   tax_amount: string | null;
   total_amount: string | null;
   normalized_result: Record<string, unknown> | null;
+  target_bpartner_id: string | null;
+  target_bpartner_name: string | null;
+  published_order_ids: string[];
   items: Array<{
     id: string;
     line_no: number;
@@ -65,6 +78,9 @@ interface DocumentDetail extends DocumentSummary {
     unit_price: string | null;
     amount: string | null;
     confidence: string;
+    matched_kg_sp_id: string | null;
+    matched_product_value: string | null;
+    matched_product_name: string | null;
   }>;
 }
 
@@ -75,7 +91,10 @@ const STATUS_LABELS: Record<Status, string> = {
   validating: "Kiểm tra JSON",
   completed: "Hoàn tất",
   needs_review: "Cần kiểm tra",
-  failed: "Thất bại"
+  failed: "Thất bại",
+  publishing: "Đang đưa vào hệ thống",
+  published: "Đã vào iDempiere",
+  publish_failed: "Đồng bộ lỗi"
 };
 const VI_NUMBER_FORMAT = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 6 });
 
@@ -202,8 +221,8 @@ export function App() {
   }, [loadDocuments]);
 
   const total = useMemo(() => Object.values(stats).reduce((sum, count) => sum + count, 0), [stats]);
-  const processing = (stats.queued ?? 0) + (stats.preprocessing ?? 0) + (stats.ocr_running ?? 0) + (stats.validating ?? 0);
-  const issues = (stats.failed ?? 0) + (stats.needs_review ?? 0);
+  const processing = (stats.queued ?? 0) + (stats.preprocessing ?? 0) + (stats.ocr_running ?? 0) + (stats.validating ?? 0) + (stats.publishing ?? 0);
+  const issues = (stats.failed ?? 0) + (stats.needs_review ?? 0) + (stats.publish_failed ?? 0);
 
   return (
     <div className="app-shell">
@@ -233,7 +252,7 @@ export function App() {
         <section className="metrics-band">
           <Metric label="Tổng tài liệu" value={total} icon={<FileText size={18} />} />
           <Metric label="Đang xử lý" value={processing} icon={<Clock3 size={18} />} tone="amber" />
-          <Metric label="Hoàn tất" value={stats.completed ?? 0} icon={<CheckCircle2 size={18} />} tone="green" />
+          <Metric label="Đã vào hệ thống" value={stats.published ?? 0} icon={<CheckCircle2 size={18} />} tone="green" />
           <Metric label="Cần xử lý" value={issues} icon={<AlertTriangle size={18} />} tone="red" />
         </section>
 
@@ -295,7 +314,7 @@ export function App() {
             </div>
           </div>
 
-          {selected && <DetailPane document={selected} deleting={deletingId === selected.id} onClose={() => setSelected(null)} onRetry={retry} onConfirm={confirm} onDelete={removeDocument} />}
+          {selected && <DetailPane document={selected} deleting={deletingId === selected.id} onClose={() => setSelected(null)} onRetry={retry} onConfirm={confirm} onDelete={removeDocument} onRefresh={openDocument} />}
         </section>
       </main>
     </div>
@@ -307,11 +326,13 @@ function Metric({ label, value, icon, tone = "neutral" }: { label: string; value
 }
 
 function StatusBadge({ status }: { status: Status }) {
-  const active = ["preprocessing", "ocr_running", "validating"].includes(status);
+  const active = ["preprocessing", "ocr_running", "validating", "publishing"].includes(status);
   return <span className={`status status-${status}`}>{active && <LoaderCircle className="spin" size={13} />}{STATUS_LABELS[status]}</span>;
 }
 
-function DetailPane({ document, deleting, onClose, onRetry, onConfirm, onDelete }: { document: DocumentDetail; deleting: boolean; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void>; onDelete: (id: string, name: string) => Promise<void> }) {
+function DetailPane({ document, deleting, onClose, onRetry, onConfirm, onDelete, onRefresh }: { document: DocumentDetail; deleting: boolean; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void>; onDelete: (id: string, name: string) => Promise<void>; onRefresh: (id: string) => Promise<void> }) {
+  const [matching, setMatching] = useState(false);
+  const [mappingError, setMappingError] = useState<string | null>(null);
   const poNumbers = [...new Set(document.items.map((item) => item.po_number).filter((value): value is string => Boolean(value)))];
   const hasRowOrders = poNumbers.length > 1;
   const poSummary = document.po_number ?? (hasRowOrders ? `${poNumbers.length} PO trong file` : poNumbers[0] ?? "-");
@@ -320,6 +341,43 @@ function DetailPane({ document, deleting, onClose, onRetry, onConfirm, onDelete 
     .filter((warning): warning is string => Boolean(warning)))];
   const canRetry = (["failed", "needs_review", "completed"] as Status[]).includes(document.status);
   const canDelete = !isProcessingStatus(document.status);
+  const canMap = (["needs_review", "publish_failed"] as Status[]).includes(document.status);
+  const unmatchedItems = document.items.filter((item) => !item.matched_kg_sp_id);
+  const readyToPublish = unmatchedItems.length === 0 && document.items.length > 0;
+
+  const autoMatch = async () => {
+    setMatching(true);
+    setMappingError(null);
+    try {
+      const response = await fetch(`/api/documents/${document.id}/auto-match`, { method: "POST" });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error ?? "Không thể đối chiếu tự động");
+      await onRefresh(document.id);
+    } catch (reason) {
+      setMappingError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setMatching(false);
+    }
+  };
+
+  const selectPartner = async (entry: CatalogEntry) => {
+    const response = await fetch(`/api/documents/${document.id}/partner`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bpartnerId: entry.id })
+    });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error ?? "Không thể chọn đối tác");
+    await onRefresh(document.id);
+  };
+
+  const selectProduct = async (itemId: string, entry: CatalogEntry) => {
+    const response = await fetch(`/api/documents/${document.id}/items/${itemId}/product`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kgSpId: entry.id })
+    });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error ?? "Không thể chọn sản phẩm");
+    await onRefresh(document.id);
+  };
 
   return <aside className="detail-pane">
     <div className="detail-header"><div><span>Chi tiết chứng từ</span><h2>{document.document_title ?? document.original_name}</h2></div><button type="button" className="icon-button" title="Đóng" onClick={onClose}><X size={18} /></button></div>
@@ -338,9 +396,15 @@ function DetailPane({ document, deleting, onClose, onRetry, onConfirm, onDelete 
     </div>
     {document.error_message && <div className="detail-error"><AlertTriangle size={16} />{document.error_message}</div>}
     {warnings.length > 0 && <div className="warning-list">{warnings.map((warning) => <div key={warning}><AlertTriangle size={14} />{warning}</div>)}</div>}
+    {document.status === "published" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã đưa vào iDempiere</strong><span>Mã bản ghi: {document.published_order_ids.join(", ") || "Đã đồng bộ"}</span></div></div>}
+    {canMap && <section className="mapping-band">
+      <div className="mapping-heading"><div><span>Đối chiếu iDempiere</span><strong>{readyToPublish ? "Sẵn sàng xác nhận" : `Còn ${unmatchedItems.length} sản phẩm cần chọn`}</strong></div><button type="button" className="secondary-button compact-button" disabled={matching} onClick={() => void autoMatch()}>{matching ? <LoaderCircle className="spin" size={16} /> : <Link2 size={16} />}Khớp chính xác</button></div>
+      <div className="partner-mapping"><span>Đối tác liên kết (không bắt buộc)</span>{document.target_bpartner_id ? <strong><CheckCircle2 size={15} />{document.target_bpartner_name}</strong> : <CatalogPicker kind="partners" initialQuery={document.issuer_name ?? ""} placeholder="Tìm C_BPartner nếu có" onSelect={selectPartner} />}</div>
+      {mappingError && <div className="inline-error">{mappingError}</div>}
+    </section>}
     <div className="detail-table-heading"><h3>Dòng sản phẩm</h3><span>{document.items.length} dòng</span></div>
     <div className="detail-table-wrap"><table className={`product-table ${hasRowOrders ? "with-orders" : ""}`}><thead><tr><th>#</th>{hasRowOrders && <th>PO / Cửa hàng</th>}<th>Mã sản phẩm</th><th>Barcode</th><th>Tên sản phẩm</th><th className="numeric">Số lượng</th><th>Đơn vị</th><th className="numeric">Đơn giá</th><th className="numeric">Thành tiền</th></tr></thead><tbody>
-      {document.items.map((item) => <tr key={item.id}><td>{item.line_no}</td>{hasRowOrders && <td className="po-cell"><strong>{item.po_number ?? "-"}</strong><span>{item.store_name ?? item.store_code ?? "-"}</span></td>}<td><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong>{item.product_code && item.vendor_product_code && <span>NCC: {item.vendor_product_code}</span>}</td><td className="mono">{item.barcode ?? "-"}</td><td><strong>{item.product_name ?? "-"}</strong>{item.model && <span>Model: {item.model}</span>}</td><td className="numeric"><strong>{formatDecimal(item.quantity)}</strong>{item.units_per_order_unit && item.units_per_order_unit !== "1" && <span>× {formatDecimal(item.units_per_order_unit)} / ĐVT</span>}</td><td><strong>{item.unit ?? "-"}</strong></td><td className="numeric money-cell">{formatMoney(item.unit_price, null)}</td><td className="numeric money-cell strong">{formatMoney(item.amount, null)}</td></tr>)}
+      {document.items.map((item) => <tr key={item.id}><td>{item.line_no}</td>{hasRowOrders && <td className="po-cell"><strong>{item.po_number ?? "-"}</strong><span>{item.store_name ?? item.store_code ?? "-"}</span></td>}<td><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong>{item.product_code && item.vendor_product_code && <span>NCC: {item.vendor_product_code}</span>}</td><td className="mono">{item.barcode ?? "-"}</td><td><strong>{item.product_name ?? "-"}</strong>{item.model && <span>Model: {item.model}</span>}{canMap && (item.matched_kg_sp_id ? <span className="matched-label"><CheckCircle2 size={13} />{item.matched_product_value} · {item.matched_product_name}</span> : <CatalogPicker kind="products" initialQuery={item.barcode ?? item.product_code ?? item.model ?? item.product_name ?? ""} placeholder="Chọn sản phẩm kg_sp" onSelect={(entry) => selectProduct(item.id, entry)} />)}</td><td className="numeric"><strong>{formatDecimal(item.quantity)}</strong>{item.units_per_order_unit && item.units_per_order_unit !== "1" && <span>× {formatDecimal(item.units_per_order_unit)} / ĐVT</span>}</td><td><strong>{item.unit ?? "-"}</strong></td><td className="numeric money-cell">{formatMoney(item.unit_price, null)}</td><td className="numeric money-cell strong">{formatMoney(item.amount, null)}</td></tr>)}
       {!document.items.length && <tr><td colSpan={hasRowOrders ? 9 : 8} className="empty-state">Chưa có dữ liệu</td></tr>}
     </tbody></table></div>
     <div className="mobile-product-list">
@@ -349,11 +413,12 @@ function DetailPane({ document, deleting, onClose, onRetry, onConfirm, onDelete 
         {hasRowOrders && <div className="mobile-product-order"><span>PO {item.po_number ?? "-"}</span><strong>{item.store_name ?? item.store_code ?? "-"}</strong></div>}
         <div className="mobile-product-keys"><div><span>Mã sản phẩm</span><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong></div><div><span>Barcode</span><strong>{item.barcode ?? "-"}</strong></div></div>
         <div className="mobile-product-values"><div><span>Số lượng</span><strong>{formatDecimal(item.quantity)}{item.units_per_order_unit && item.units_per_order_unit !== "1" ? ` × ${formatDecimal(item.units_per_order_unit)}` : ""}</strong></div><div><span>Đơn vị</span><strong>{item.unit ?? "-"}</strong></div><div><span>Đơn giá</span><strong>{formatMoney(item.unit_price, null)}</strong></div><div><span>Thành tiền</span><strong>{formatMoney(item.amount, null)}</strong></div></div>
+        {canMap && (item.matched_kg_sp_id ? <span className="matched-label"><CheckCircle2 size={13} />{item.matched_product_value} · {item.matched_product_name}</span> : <CatalogPicker kind="products" initialQuery={item.barcode ?? item.product_code ?? item.model ?? item.product_name ?? ""} placeholder="Chọn sản phẩm kg_sp" onSelect={(entry) => selectProduct(item.id, entry)} />)}
       </article>)}
       {!document.items.length && <div className="empty-state">Chưa có dữ liệu</div>}
     </div>
     {(canRetry || canDelete) && <div className="detail-footer">
-      {document.status === "needs_review" && <button type="button" className="primary-button" onClick={() => void onConfirm(document.id)}><CheckCircle2 size={17} />Xác nhận</button>}
+      {canMap && <button type="button" className="primary-button" disabled={!readyToPublish} title={readyToPublish ? "Đưa đơn hàng vào iDempiere" : "Cần đối chiếu đủ sản phẩm"} onClick={() => void onConfirm(document.id)}><CheckCircle2 size={17} />Xác nhận và đưa vào hệ thống</button>}
       {canRetry && <button type="button" className="secondary-button" onClick={() => void onRetry(document.id)}><RotateCcw size={17} />{document.status === "completed" ? "OCR lại" : "Chạy lại OCR"}</button>}
       {canDelete && <button type="button" className="danger-button" disabled={deleting} onClick={() => void onDelete(document.id, document.original_name)}>{deleting ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}Xóa</button>}
     </div>}
@@ -396,8 +461,46 @@ function formatDecimal(value: string | null) {
   return value.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
 }
 
+function CatalogPicker({ kind, initialQuery, placeholder, onSelect }: { kind: "products" | "partners"; initialQuery: string; placeholder: string; onSelect: (entry: CatalogEntry) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(initialQuery);
+  const [results, setResults] = useState<CatalogEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || !query.trim()) return setResults([]);
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const response = await fetch(`/api/catalog/${kind}?query=${encodeURIComponent(query.trim())}`, { signal: controller.signal });
+        if (!response.ok) throw new Error("Không tải được danh mục iDempiere");
+        const payload = await response.json();
+        setResults(payload[kind] ?? []);
+      } catch (reason) {
+        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason));
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [kind, open, query]);
+
+  return <div className="catalog-picker">
+    <div className="catalog-input"><Search size={14} /><input value={query} placeholder={placeholder} onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true); }} />{loading && <LoaderCircle className="spin" size={14} />}</div>
+    {open && <div className="catalog-results">
+      {results.map((entry) => <button type="button" key={entry.id} onClick={() => { setOpen(false); void onSelect(entry).catch((reason) => setError(reason.message)); }}><strong>{entry.value}</strong><span>{entry.name}</span>{entry.barcode && <code>{entry.barcode}</code>}</button>)}
+      {!loading && !results.length && <span className="catalog-empty">Không có kết quả chính xác</span>}
+      {error && <span className="catalog-empty error-text">{error}</span>}
+      <button type="button" className="catalog-close" onClick={() => setOpen(false)}>Đóng</button>
+    </div>}
+  </div>;
+}
+
 function isProcessingStatus(status: Status) {
-  return ["preprocessing", "ocr_running", "validating"].includes(status);
+  return ["preprocessing", "ocr_running", "validating", "publishing"].includes(status);
 }
 
 function formatMoney(value: string | null, currency: string | null) {

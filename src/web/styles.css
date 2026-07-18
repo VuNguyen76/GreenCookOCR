@@ -23,7 +23,7 @@ button { cursor: pointer; }
 .primary-button, .secondary-button, .danger-button, .icon-button { border: 1px solid transparent; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 .primary-button { height: 38px; padding: 0 14px; background: #126444; color: #fff; border-radius: 6px; font-weight: 650; }
 .primary-button:hover { background: #0d5036; }
-.primary-button:disabled { opacity: .65; cursor: wait; }
+.primary-button:disabled { opacity: .55; cursor: not-allowed; }
 .secondary-button { min-height: 36px; padding: 0 12px; border-color: #cad4cf; background: #fff; color: #183c2f; border-radius: 6px; font-weight: 600; }
 .danger-button { min-height: 36px; margin-left: auto; padding: 0 12px; border-color: #e6b9b1; background: #fff; color: #9a3527; border-radius: 6px; font-weight: 600; }
 .danger-button:hover { background: #fff0ed; }
@@ -82,10 +82,10 @@ code { font-size: 11px; color: #5a665f; white-space: nowrap; overflow: hidden; t
 .row-actions { justify-content: flex-end; color: #89938f; }
 .status { width: fit-content; min-height: 24px; padding: 3px 8px; display: inline-flex; gap: 5px; align-items: center; border-radius: 4px; font-size: 11px; font-weight: 650; white-space: nowrap; }
 .status-queued { color: #5b6661; background: #edf0ef; }
-.status-preprocessing, .status-ocr_running, .status-validating { color: #8a5a08; background: #fff2d4; }
-.status-completed { color: #0e5c3d; background: #e5f3ec; }
+.status-preprocessing, .status-ocr_running, .status-validating, .status-publishing { color: #8a5a08; background: #fff2d4; }
+.status-completed, .status-published { color: #0e5c3d; background: #e5f3ec; }
 .status-needs_review { color: #8a5a08; background: #fff2d4; }
-.status-failed { color: #983728; background: #fae9e5; }
+.status-failed, .status-publish_failed { color: #983728; background: #fae9e5; }
 .empty-state { height: 150px; text-align: center; color: #8b9691; cursor: default; }
 
 .detail-pane { min-width: 0; border-left: 1px solid #dce2df; background: #fbfcfb; display: flex; flex-direction: column; max-height: calc(100vh - 64px); position: sticky; top: 64px; overflow: hidden; }
@@ -106,6 +106,33 @@ code { font-size: 11px; color: #5a665f; white-space: nowrap; overflow: hidden; t
 .detail-error { margin: 12px 16px 0; padding: 9px; gap: 7px; color: #8f2f23; background: #fff0ed; font-size: 12px; }
 .warning-list { margin: 10px 16px 0; color: #77500d; font-size: 11px; }
 .warning-list > div { gap: 6px; margin-bottom: 5px; }
+.publish-success { margin: 12px 16px 0; padding: 10px 12px; display: flex; align-items: center; gap: 9px; color: #0d573a; background: #e9f4ee; border: 1px solid #cfe4d8; }
+.publish-success > div { display: flex; flex-direction: column; }
+.publish-success strong { font-size: 12px; }
+.publish-success span { margin-top: 2px; font-size: 10px; color: #527064; }
+.mapping-band { margin: 12px 16px 0; padding: 11px 12px; border: 1px solid #d7e0dc; background: #fff; }
+.mapping-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.mapping-heading > div, .partner-mapping { display: flex; flex-direction: column; }
+.mapping-heading span, .partner-mapping > span { color: #74807b; font-size: 10px; text-transform: uppercase; font-weight: 700; }
+.mapping-heading strong { margin-top: 3px; font-size: 12px; }
+.compact-button { min-height: 32px; padding: 0 10px; font-size: 11px; }
+.partner-mapping { margin-top: 10px; }
+.partner-mapping > strong { margin-top: 5px; display: flex; align-items: center; gap: 6px; color: #0d573a; font-size: 12px; }
+.inline-error { margin-top: 8px; color: #983728; font-size: 11px; }
+.matched-label { margin-top: 6px !important; display: flex !important; align-items: center; gap: 4px; color: #0d6845 !important; font-weight: 650; }
+.catalog-picker { margin-top: 6px; position: relative; min-width: 180px; }
+.catalog-input { height: 30px; padding: 0 8px; display: flex; align-items: center; gap: 6px; border: 1px solid #cbd6d1; background: #fff; border-radius: 4px; color: #68756f; }
+.catalog-input:focus-within { border-color: #347c62; box-shadow: 0 0 0 2px rgba(18, 100, 68, .08); }
+.catalog-input input { min-width: 0; width: 100%; border: 0; outline: 0; color: #1f2c27; font-size: 11px; }
+.catalog-results { position: absolute; z-index: 50; top: calc(100% + 4px); left: 0; width: min(360px, 72vw); max-height: 240px; overflow: auto; border: 1px solid #cdd7d2; background: #fff; box-shadow: 0 8px 20px rgba(20, 35, 29, .13); }
+.catalog-results > button { width: 100%; padding: 8px 10px; display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 3px 8px; border: 0; border-bottom: 1px solid #edf0ef; background: #fff; text-align: left; }
+.catalog-results > button:hover { background: #f1f7f4; }
+.catalog-results strong { font-size: 10px; color: #0d573a; }
+.catalog-results span { margin: 0 !important; font-size: 10px !important; color: #34433d !important; }
+.catalog-results code { grid-column: 2; font-size: 9px; }
+.catalog-empty { display: block; padding: 10px; color: #74807b; font-size: 10px; }
+.catalog-results .catalog-close { display: block; padding: 7px 10px; color: #53615c; text-align: center; font-size: 10px; }
+.error-text { color: #983728; }
 .detail-table-heading { min-height: 46px; padding: 10px 18px; display: flex; align-items: center; justify-content: space-between; }
 .detail-table-heading h3 { margin: 0; font-size: 14px; }
 .detail-table-heading span { font-size: 11px; color: #6f7a75; }
@@ -171,4 +198,12 @@ code { font-size: 11px; color: #5a665f; white-space: nowrap; overflow: hidden; t
   .mobile-product-keys > div:last-child, .mobile-product-values > div:last-child { border-right: 0; }
   .mobile-product span { color: #78847f; font-size: 10px; }
   .mobile-product strong { margin-top: 3px; font-size: 11px; overflow-wrap: anywhere; }
+  .mapping-band { margin: 10px 12px 0; }
+  .mapping-heading { align-items: flex-start; }
+  .catalog-picker { margin: 8px 10px 10px; }
+  .partner-mapping .catalog-picker { margin-left: 0; margin-right: 0; }
+  .catalog-results { position: fixed; left: 12px; right: 12px; top: auto; bottom: 76px; width: auto; max-height: 45vh; }
+  .detail-footer { flex-wrap: wrap; }
+  .detail-footer .primary-button { width: 100%; }
+  .detail-footer .secondary-button, .detail-footer .danger-button { flex: 1 1 0; margin-left: 0; white-space: nowrap; }
 }

@@ -8,7 +8,6 @@ import {
   recoverStaleDocuments,
   setDocumentStatus
 } from "../db/repository.js";
-import { terminateAnonymousWorkersOnDatabaseHost } from "../db/pool.js";
 import { GeminiOcrService } from "./gemini.js";
 import { normalizeOcrResult } from "./normalizer.js";
 import { cleanupPreparedInput, prepareDocument } from "./preprocessor.js";
@@ -42,10 +41,6 @@ export class SequentialOcrWorker {
     if (this.running || this.stopping) return this.schedule();
     this.running = true;
     try {
-      const terminated = await terminateAnonymousWorkersOnDatabaseHost();
-      if (terminated > 0) {
-        console.warn(`Terminated ${terminated} anonymous OCR worker connection(s) on database host`);
-      }
       await recoverStaleDocuments();
       const document = await claimNextDocument();
       if (!document) return;

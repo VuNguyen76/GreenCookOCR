@@ -8,5 +8,9 @@ storage/
 .DS_Store
 .playwright-cli/
 output/
-scripts/
+scripts/*
+!scripts/import-postgres-staging.ts
+!scripts/migrate-idempiere.ts
+!scripts/verify-idempiere.ts
+!scripts/verify-publisher.ts
 tmp/

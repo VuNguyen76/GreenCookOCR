@@ -7,11 +7,14 @@ import { ZodError } from "zod";
 import { config } from "./config.js";
 import { migrate } from "./db/migrate.js";
 import { pool } from "./db/pool.js";
+import { stagingDatabase } from "./db/staging.js";
+import { SequentialPublishWorker } from "./idempiere/publisher.js";
 import { registerApiRoutes } from "./routes/api.js";
 import { SequentialOcrWorker } from "./services/worker.js";
 
 const app = Fastify({ logger: true, bodyLimit: config.maxFileSizeBytes + 1024 * 1024 });
 const worker = new SequentialOcrWorker();
+const publishWorker = new SequentialPublishWorker();
 
 await fs.mkdir(config.uploadDir, { recursive: true });
 await fs.mkdir(config.workDir, { recursive: true });
@@ -53,12 +56,15 @@ app.setErrorHandler((error, _request, reply) => {
 });
 
 await worker.start();
+publishWorker.start();
 await app.listen({ host: config.host, port: config.port });
 
 async function shutdown(): Promise<void> {
   worker.stop();
+  publishWorker.stop();
   await app.close();
   await pool.end();
+  stagingDatabase.close();
   process.exit(0);
 }
 

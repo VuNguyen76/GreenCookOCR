@@ -8,18 +8,30 @@ import { fileTypeFromFile } from "file-type";
 import { z } from "zod";
 import { config } from "../config.js";
 import {
-  confirmDocument,
+  queuePublish,
   createBatch,
   deleteDocument,
   getDocument,
   getStats,
   insertDocument,
   listDocuments,
-  retryDocument
+  retryDocument,
+  setItemProductMatch,
+  setTargetPartner
 } from "../db/repository.js";
+import {
+  getTargetPartner,
+  getTargetProduct,
+  resolveTargetPartner,
+  resolveTargetProduct,
+  searchTargetPartners,
+  searchTargetProducts
+} from "../idempiere/catalog.js";
 
 const BatchSchema = z.object({ fileCount: z.number().int().positive().max(500) });
 const IdParams = z.object({ id: z.uuid() });
+const ItemParams = z.object({ id: z.uuid(), itemId: z.uuid() });
+const CatalogQuery = z.object({ query: z.string().trim().min(1).max(120) });
 const ALLOWED_EXTENSIONS = new Set([
   ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff",
   ".doc", ".docx", ".xlsx", ".txt", ".csv"
@@ -92,6 +104,65 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     return document;
   });
 
+  app.get("/api/catalog/products", async (request) => {
+    const { query } = CatalogQuery.parse(request.query);
+    return { products: await searchTargetProducts(query) };
+  });
+
+  app.get("/api/catalog/partners", async (request) => {
+    const { query } = CatalogQuery.parse(request.query);
+    return { partners: await searchTargetPartners(query) };
+  });
+
+  app.patch("/api/documents/:id/partner", async (request, reply) => {
+    const { id } = IdParams.parse(request.params);
+    const { bpartnerId } = z.object({ bpartnerId: z.string().regex(/^\d+$/) }).parse(request.body);
+    const partner = await getTargetPartner(bpartnerId);
+    if (!partner) return reply.code(404).send({ error: "Không tìm thấy đối tác trong iDempiere" });
+    if (!await setTargetPartner(id, partner.id, partner.name)) {
+      return reply.code(409).send({ error: "Chỉ có thể sửa đối tác khi chứng từ đang cần kiểm tra" });
+    }
+    return { partner };
+  });
+
+  app.patch("/api/documents/:id/items/:itemId/product", async (request, reply) => {
+    const { id, itemId } = ItemParams.parse(request.params);
+    const { kgSpId } = z.object({ kgSpId: z.string().regex(/^\d+$/) }).parse(request.body);
+    const product = await getTargetProduct(kgSpId);
+    if (!product) return reply.code(404).send({ error: "Không tìm thấy sản phẩm trong iDempiere" });
+    if (!await setItemProductMatch(id, itemId, product)) {
+      return reply.code(409).send({ error: "Chỉ có thể sửa sản phẩm khi chứng từ đang cần kiểm tra" });
+    }
+    return { product };
+  });
+
+  app.post("/api/documents/:id/auto-match", async (request, reply) => {
+    const { id } = IdParams.parse(request.params);
+    const document = await getDocument(id);
+    if (!document) return reply.code(404).send({ error: "Không tìm thấy tài liệu" });
+
+    let partnerMatched = Boolean(document.target_bpartner_id);
+    if (!partnerMatched && document.issuer_name) {
+      const partner = await resolveTargetPartner(String(document.issuer_name));
+      if (partner) partnerMatched = await setTargetPartner(id, partner.id, partner.name);
+    }
+
+    const matchResults = await Promise.all(document.items.map(async (item) => {
+      if (item.matched_kg_sp_id) return { lineNo: Number(item.line_no), matched: true };
+      const product = await resolveTargetProduct(item);
+      const matched = Boolean(product)
+        && await setItemProductMatch(id, String(item.id), product!, "exact");
+      return { lineNo: Number(item.line_no), matched };
+    }));
+    const matchSummary = matchResults.reduce((summary, result) => {
+      if (result.matched) summary.productMatches += 1;
+      else summary.unmatchedLines.push(result.lineNo);
+      return summary;
+    }, { productMatches: 0, unmatchedLines: [] as number[] });
+
+    return { partnerMatched, ...matchSummary };
+  });
+
   app.post("/api/documents/:id/retry", async (request, reply) => {
     const { id } = IdParams.parse(request.params);
     if (!await retryDocument(id)) {
@@ -102,8 +173,22 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/api/documents/:id/confirm", async (request, reply) => {
     const { id } = IdParams.parse(request.params);
-    if (!await confirmDocument(id)) {
-      return reply.code(409).send({ error: "Chỉ có thể xác nhận tài liệu đang cần kiểm tra" });
+    const document = await getDocument(id);
+    if (!document) return reply.code(404).send({ error: "Không tìm thấy tài liệu" });
+    if (!document.items.length) {
+      return reply.code(409).send({ error: "Chứng từ chưa có dòng sản phẩm để đưa vào hệ thống" });
+    }
+    const unmatchedLines = document.items.reduce<number[]>((lines, item) => {
+      if (!item.matched_kg_sp_id) lines.push(Number(item.line_no));
+      return lines;
+    }, []);
+    if (unmatchedLines.length) {
+      return reply.code(409).send({
+        error: `Cần đối chiếu sản phẩm ở dòng ${unmatchedLines.join(", ")} trước khi xác nhận`
+      });
+    }
+    if (!await queuePublish(id)) {
+      return reply.code(409).send({ error: "Chỉ có thể xác nhận tài liệu đang cần kiểm tra hoặc đồng bộ lỗi" });
     }
     return { ok: true };
   });
