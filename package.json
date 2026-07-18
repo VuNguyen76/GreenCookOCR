@@ -12,7 +12,7 @@
     "build:server": "tsup src/server/index.ts --format esm --out-dir dist-server --clean --sourcemap",
     "build:web": "vite build",
     "start": "node dist-server/index.js",
-    "db:migrate": "tsx src/server/db/migrate.ts",
+    "db:migrate": "tsx scripts/migrate-staging.ts",
     "idempiere:migrate": "tsx scripts/migrate-idempiere.ts",
     "idempiere:verify": "tsx scripts/verify-idempiere.ts",
     "idempiere:verify-publisher": "tsx scripts/verify-publisher.ts",

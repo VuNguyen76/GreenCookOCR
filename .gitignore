@@ -11,6 +11,7 @@ output/
 scripts/*
 !scripts/import-postgres-staging.ts
 !scripts/migrate-idempiere.ts
+!scripts/migrate-staging.ts
 !scripts/verify-idempiere.ts
 !scripts/verify-publisher.ts
 tmp/
