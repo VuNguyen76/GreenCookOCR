@@ -17,6 +17,15 @@ await fs.mkdir(config.uploadDir, { recursive: true });
 await fs.mkdir(config.workDir, { recursive: true });
 await migrate();
 
+app.log.info({
+  ocrProvider: config.ocrProvider,
+  ocrModel: config.ocrProvider === "openai-compatible"
+    ? config.openAiCompatibleModel
+    : config.geminiModel,
+  uploadDir: config.uploadDir,
+  workDir: config.workDir
+}, "GreenCookOCR configuration loaded");
+
 await app.register(fastifyMultipart, {
   limits: { fileSize: config.maxFileSizeBytes, files: 1, fields: 10 }
 });

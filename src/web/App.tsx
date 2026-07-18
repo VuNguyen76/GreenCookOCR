@@ -10,10 +10,12 @@ import {
   RefreshCw,
   RotateCcw,
   ScanLine,
+  Trash2,
   Upload,
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { localizeOcrWarning } from "../shared/warning-messages.js";
 
 type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "completed" | "needs_review" | "failed";
 
@@ -76,9 +78,6 @@ const STATUS_LABELS: Record<Status, string> = {
   failed: "Thất bại"
 };
 const VI_NUMBER_FORMAT = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 6 });
-const WARNING_TRANSLATIONS: Record<string, string> = {
-  "total_amount is calculated as subtotal_amount + tax_amount because the grand total after tax was not explicitly printed on the document.": "Tổng đơn hàng được tính bằng tiền hàng cộng thuế vì chứng từ không in rõ tổng thanh toán sau thuế."
-};
 
 export function App() {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
@@ -87,6 +86,7 @@ export function App() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0, name: "" });
   const [dragging, setDragging] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -155,7 +155,11 @@ export function App() {
   }, [loadDocuments, uploading]);
 
   const retry = useCallback(async (id: string) => {
-    const response = await fetch(`/api/documents/${id}/retry`, { method: "POST" });
+    const response = await fetch(`/api/documents/${id}/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       setError(payload.error ?? "Không thể chạy lại");
@@ -165,13 +169,36 @@ export function App() {
   }, [loadDocuments]);
 
   const confirm = useCallback(async (id: string) => {
-    const response = await fetch(`/api/documents/${id}/confirm`, { method: "POST" });
+    const response = await fetch(`/api/documents/${id}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       setError(payload.error ?? "Không thể xác nhận tài liệu");
       return;
     }
     await loadDocuments();
+  }, [loadDocuments]);
+
+  const removeDocument = useCallback(async (id: string, name: string) => {
+    if (!window.confirm(`Xóa tài liệu "${name}" và file đã upload?`)) return;
+    setDeletingId(id);
+    setError(null);
+    try {
+      const response = await fetch(`/api/documents/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error ?? "Không thể xóa tài liệu");
+      }
+      setSelected((current) => current?.id === id ? null : current);
+      await loadDocuments();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setDeletingId(null);
+    }
   }, [loadDocuments]);
 
   const total = useMemo(() => Object.values(stats).reduce((sum, count) => sum + count, 0), [stats]);
@@ -257,6 +284,7 @@ export function App() {
                       <td className="numeric">{document.item_count ?? 0}</td>
                       <td><div className="row-actions">
                         {(document.status === "failed" || document.status === "needs_review") && <button type="button" className="icon-button compact" title="Chạy lại" onClick={(event) => { event.stopPropagation(); void retry(document.id); }}><RotateCcw size={16} /></button>}
+                        {!isProcessingStatus(document.status) && <button type="button" className="icon-button compact danger-icon" title="Xóa tài liệu" disabled={deletingId === document.id} onClick={(event) => { event.stopPropagation(); void removeDocument(document.id, document.original_name); }}><Trash2 size={16} /></button>}
                         <ChevronRight size={17} />
                       </div></td>
                     </tr>
@@ -267,7 +295,7 @@ export function App() {
             </div>
           </div>
 
-          {selected && <DetailPane document={selected} onClose={() => setSelected(null)} onRetry={retry} onConfirm={confirm} />}
+          {selected && <DetailPane document={selected} deleting={deletingId === selected.id} onClose={() => setSelected(null)} onRetry={retry} onConfirm={confirm} onDelete={removeDocument} />}
         </section>
       </main>
     </div>
@@ -283,10 +311,15 @@ function StatusBadge({ status }: { status: Status }) {
   return <span className={`status status-${status}`}>{active && <LoaderCircle className="spin" size={13} />}{STATUS_LABELS[status]}</span>;
 }
 
-function DetailPane({ document, onClose, onRetry, onConfirm }: { document: DocumentDetail; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void> }) {
+function DetailPane({ document, deleting, onClose, onRetry, onConfirm, onDelete }: { document: DocumentDetail; deleting: boolean; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void>; onDelete: (id: string, name: string) => Promise<void> }) {
   const poNumbers = [...new Set(document.items.map((item) => item.po_number).filter((value): value is string => Boolean(value)))];
   const hasRowOrders = poNumbers.length > 1;
   const poSummary = document.po_number ?? (hasRowOrders ? `${poNumbers.length} PO trong file` : poNumbers[0] ?? "-");
+  const warnings = [...new Set(document.warnings
+    .map(localizeOcrWarning)
+    .filter((warning): warning is string => Boolean(warning)))];
+  const canRetry = (["failed", "needs_review", "completed"] as Status[]).includes(document.status);
+  const canDelete = !isProcessingStatus(document.status);
 
   return <aside className="detail-pane">
     <div className="detail-header"><div><span>Chi tiết chứng từ</span><h2>{document.document_title ?? document.original_name}</h2></div><button type="button" className="icon-button" title="Đóng" onClick={onClose}><X size={18} /></button></div>
@@ -304,7 +337,7 @@ function DetailPane({ document, onClose, onRetry, onConfirm }: { document: Docum
       <TotalStat label={hasRowOrders ? "Tổng giá trị dòng" : "Tổng đơn hàng"} value={formatMoney(document.total_amount, document.currency)} emphasis />
     </div>
     {document.error_message && <div className="detail-error"><AlertTriangle size={16} />{document.error_message}</div>}
-    {document.warnings?.length > 0 && <div className="warning-list">{document.warnings.map((warning) => <div key={warning}><AlertTriangle size={14} />{formatWarning(warning)}</div>)}</div>}
+    {warnings.length > 0 && <div className="warning-list">{warnings.map((warning) => <div key={warning}><AlertTriangle size={14} />{warning}</div>)}</div>}
     <div className="detail-table-heading"><h3>Dòng sản phẩm</h3><span>{document.items.length} dòng</span></div>
     <div className="detail-table-wrap"><table className={`product-table ${hasRowOrders ? "with-orders" : ""}`}><thead><tr><th>#</th>{hasRowOrders && <th>PO / Cửa hàng</th>}<th>Mã sản phẩm</th><th>Barcode</th><th>Tên sản phẩm</th><th className="numeric">Số lượng</th><th>Đơn vị</th><th className="numeric">Đơn giá</th><th className="numeric">Thành tiền</th></tr></thead><tbody>
       {document.items.map((item) => <tr key={item.id}><td>{item.line_no}</td>{hasRowOrders && <td className="po-cell"><strong>{item.po_number ?? "-"}</strong><span>{item.store_name ?? item.store_code ?? "-"}</span></td>}<td><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong>{item.product_code && item.vendor_product_code && <span>NCC: {item.vendor_product_code}</span>}</td><td className="mono">{item.barcode ?? "-"}</td><td><strong>{item.product_name ?? "-"}</strong>{item.model && <span>Model: {item.model}</span>}</td><td className="numeric"><strong>{formatDecimal(item.quantity)}</strong>{item.units_per_order_unit && item.units_per_order_unit !== "1" && <span>× {formatDecimal(item.units_per_order_unit)} / ĐVT</span>}</td><td><strong>{item.unit ?? "-"}</strong></td><td className="numeric money-cell">{formatMoney(item.unit_price, null)}</td><td className="numeric money-cell strong">{formatMoney(item.amount, null)}</td></tr>)}
@@ -319,9 +352,10 @@ function DetailPane({ document, onClose, onRetry, onConfirm }: { document: Docum
       </article>)}
       {!document.items.length && <div className="empty-state">Chưa có dữ liệu</div>}
     </div>
-    {(["failed", "needs_review", "completed"] as Status[]).includes(document.status) && <div className="detail-footer">
+    {(canRetry || canDelete) && <div className="detail-footer">
       {document.status === "needs_review" && <button type="button" className="primary-button" onClick={() => void onConfirm(document.id)}><CheckCircle2 size={17} />Xác nhận</button>}
-      <button type="button" className="secondary-button" onClick={() => void onRetry(document.id)}><RotateCcw size={17} />{document.status === "completed" ? "OCR lại" : "Chạy lại OCR"}</button>
+      {canRetry && <button type="button" className="secondary-button" onClick={() => void onRetry(document.id)}><RotateCcw size={17} />{document.status === "completed" ? "OCR lại" : "Chạy lại OCR"}</button>}
+      {canDelete && <button type="button" className="danger-button" disabled={deleting} onClick={() => void onDelete(document.id, document.original_name)}>{deleting ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}Xóa</button>}
     </div>}
   </aside>;
 }
@@ -357,13 +391,13 @@ function formatDate(value: string | null) {
   return match ? `${match[3]}/${match[2]}/${match[1]}` : value;
 }
 
-function formatWarning(warning: string) {
-  return WARNING_TRANSLATIONS[warning.trim()] ?? warning;
-}
-
 function formatDecimal(value: string | null) {
   if (!value) return "-";
   return value.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+}
+
+function isProcessingStatus(status: Status) {
+  return ["preprocessing", "ocr_running", "validating"].includes(status);
 }
 
 function formatMoney(value: string | null, currency: string | null) {

@@ -1,11 +1,12 @@
 import Decimal from "decimal.js";
 import type { OcrDocument, OcrItem } from "../../shared/ocr.js";
 import { OcrDocumentSchema } from "../../shared/ocr.js";
+import { localizeOcrWarning } from "../../shared/warning-messages.js";
 
 export function normalizeOcrResult(raw: unknown): OcrDocument {
   const parsed = OcrDocumentSchema.parse(raw);
   const warnings = new Set(parsed.warnings.flatMap((warning) => {
-    const cleaned = normalizeWarningMessage(warning);
+    const cleaned = localizeOcrWarning(warning);
     return cleaned ? [cleaned] : [];
   }));
   const seenLines = new Set<number>();
@@ -328,14 +329,6 @@ function isExpectedDmxExportNotice(warning: string): boolean {
 
 function isIncorrectDmxProductIdNotice(warning: string): boolean {
   return /product\s+ids?.*check\s+digits?.*barcode/i.test(warning);
-}
-
-function normalizeWarningMessage(warning: string): string {
-  const cleaned = cleanText(warning);
-  if (/^total_amount is calculated as subtotal_amount \+ tax_amount because the grand total after tax was not explicitly printed on the document\.?$/i.test(cleaned)) {
-    return "Tổng đơn hàng được tính bằng tiền hàng cộng thuế vì chứng từ không in rõ tổng thanh toán sau thuế.";
-  }
-  return cleaned;
 }
 
 function cleanText(value: string): string {

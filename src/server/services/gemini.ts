@@ -208,7 +208,10 @@ export class GeminiOcrService {
 
   private async renderPdfPages(inputPath: string, temporaryPaths: string[]): Promise<string[]> {
     const prefix = path.join(os.tmpdir(), `greencook-ocr-${randomUUID()}`);
-    await execFileAsync(config.pdftoppmPath, ["-png", "-r", "180", inputPath, prefix], {
+    // The local OpenAI-compatible router is less reliable with oversized page
+    // images: at 180 DPI it sometimes returns an empty SSE response or tool calls
+    // instead of JSON. 120 DPI keeps DMX/retail forms readable while staying stable.
+    await execFileAsync(config.pdftoppmPath, ["-png", "-r", "120", inputPath, prefix], {
       maxBuffer: 20 * 1024 * 1024,
       shell: process.platform === "win32" && /\.cmd$/i.test(config.pdftoppmPath)
     });

@@ -1,15 +1,17 @@
-import "dotenv/config";
 import path from "node:path";
+import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
+
+loadDotenv({ override: true });
 
 const EnvSchema = z.object({
   GEMINI_API_KEY: z.string().min(10),
   GEMINI_MODEL: z.string().default("gemini-3.5-flash"),
   OCR_PROVIDER: z.enum(["gemini", "openai-compatible"]).default("gemini"),
-  OPENAI_COMPATIBLE_BASE_URL: z.string().url().default("http://localhost:20128/v1"),
+  OPENAI_COMPATIBLE_BASE_URL: z.url().default("http://localhost:20128/v1"),
   OPENAI_COMPATIBLE_API_KEY: z.string().optional(),
   OPENAI_COMPATIBLE_MODEL: z.string().default("antigravity/gemini-3.5-flash-medium"),
-  DATABASE_URL: z.string().url(),
+  DATABASE_URL: z.url(),
   DATABASE_SSL: z.enum(["true", "false"]).default("false"),
   HOST: z.string().default("127.0.0.1"),
   PORT: z.coerce.number().int().positive().default(3000),

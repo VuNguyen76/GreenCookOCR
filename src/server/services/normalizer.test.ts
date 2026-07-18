@@ -47,6 +47,59 @@ describe("normalizeOcrResult", () => {
     ]);
   });
 
+  it("translates delivery-request price warnings and drops duplicated document-id notes", () => {
+    const result = normalizeOcrResult({
+      ...base,
+      template_key: "po_nguyenkim_delivery_request",
+      document_type: "delivery_request",
+      warnings: [
+        "No price or amount values are specified in this Delivery Request document.",
+        "Document ID is 4801100916"
+      ]
+    });
+
+    expect(result.warnings).toEqual([
+      "Chứng từ đề nghị giao hàng không ghi đơn giá hoặc thành tiền."
+    ]);
+  });
+
+  it("translates VAT price-basis notes to Vietnamese", () => {
+    const result = normalizeOcrResult({
+      ...base,
+      warnings: [
+        "Amount on item is post-VAT, while unit_price is pre-VAT.",
+        "Unit price is before VAT, but the line amount includes VAT."
+      ]
+    });
+
+    expect(result.warnings).toEqual([
+      "Thành tiền của dòng sản phẩm đã gồm VAT, còn đơn giá là giá trước VAT."
+    ]);
+  });
+
+  it("translates all known English model notes to Vietnamese", () => {
+    const result = normalizeOcrResult({
+      ...base,
+      warnings: [
+        "Document date (po_date) is blank on the document, so it is set to null.",
+        "Document reference number is 4801105433, order number 4600170104 is used for po_number.",
+        "For items 3 and 4, amount matches quantity * units_per_order_unit * unit_price, reflecting price per individual piece (Cai) rather than per Pack.",
+        "No unit prices or total amounts found on the document.",
+        "Pricing/amount columns are not present in this document template, so financial totals are set to null.",
+        "Total after tax (total_amount) is not explicitly printed on the document."
+      ]
+    });
+
+    expect(result.warnings).toEqual([
+      "Ngày chứng từ (ngày PO) để trống nên không thể ghi nhận.",
+      "Số tham chiếu chứng từ là 4801105433; sử dụng số đơn hàng 4600170104 làm số PO.",
+      "Ở dòng 3 và 4, thành tiền khớp số lượng × quy đổi × đơn giá; đơn giá được tính theo từng cái thay vì theo gói.",
+      "Chứng từ không ghi đơn giá hoặc tổng tiền.",
+      "Mẫu chứng từ không có cột đơn giá hoặc thành tiền nên các tổng tiền được để trống.",
+      "Chứng từ không in rõ tổng tiền sau thuế."
+    ]);
+  });
+
   it("moves a Big C Article-like product code into barcode", () => {
     const result = normalizeOcrResult({
       ...base,

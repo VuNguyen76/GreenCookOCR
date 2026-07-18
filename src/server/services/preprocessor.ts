@@ -17,11 +17,12 @@ export type PreparedInput =
 
 export async function prepareDocument(document: DocumentRow): Promise<PreparedInput> {
   const extension = path.extname(document.original_name).toLowerCase();
+  const filePath = await resolveDocumentPath(document);
 
   if (extension === ".pdf") {
     return {
       mode: "file",
-      path: document.storage_path,
+      path: filePath,
       mimeType: "application/pdf",
       kind: "document",
       temporary: false
@@ -30,7 +31,7 @@ export async function prepareDocument(document: DocumentRow): Promise<PreparedIn
 
   if ([".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"].includes(extension)) {
     const outputPath = path.join(config.workDir, `${document.id}.jpg`);
-    await sharp(document.storage_path)
+    await sharp(filePath)
       .rotate()
       .flatten({ background: "#ffffff" })
       .jpeg({ quality: 94, chromaSubsampling: "4:4:4" })
@@ -45,28 +46,64 @@ export async function prepareDocument(document: DocumentRow): Promise<PreparedIn
   }
 
   if (extension === ".docx") {
-    const result = await mammoth.extractRawText({ path: document.storage_path });
+    const result = await mammoth.extractRawText({ path: filePath });
     return { mode: "text", text: limitText(result.value), temporary: false };
   }
 
   if (extension === ".doc") {
     const { stdout } = await execFileAsync(
       config.antiwordPath,
-      ["-m", "UTF-8.txt", document.storage_path],
+      ["-m", "UTF-8.txt", filePath],
       { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }
     );
     return { mode: "text", text: limitText(stdout), temporary: false };
   }
 
   if (extension === ".xlsx") {
-    return { mode: "text", text: await workbookToText(document.storage_path), temporary: false };
+    return { mode: "text", text: await workbookToText(filePath), temporary: false };
   }
 
   if ([".txt", ".csv"].includes(extension)) {
-    return { mode: "text", text: limitText(await fs.readFile(document.storage_path, "utf8")), temporary: false };
+    return { mode: "text", text: limitText(await fs.readFile(filePath, "utf8")), temporary: false };
   }
 
   throw new Error(`Unsupported file type: ${extension || document.mime_type}`);
+}
+
+export class UploadedFileMissingError extends Error {
+  constructor() {
+    super("\u004b\u0068\u00f4\u006e\u0067 \u0074\u00ec\u006d \u0074\u0068\u1ea5\u0079 \u0066\u0069\u006c\u0065 \u0111\u00e3 \u0075\u0070\u006c\u006f\u0061\u0064. \u0056\u0075\u0069 \u006c\u00f2\u006e\u0067 \u0075\u0070\u006c\u006f\u0061\u0064 \u006c\u1ea1\u0069 \u0074\u00e0\u0069 \u006c\u0069\u1ec7\u0075.");
+    this.name = "UploadedFileMissingError";
+  }
+}
+
+export async function resolveDocumentPath(document: DocumentRow): Promise<string> {
+  if (await fileExists(document.storage_path)) return document.storage_path;
+
+  const storedName = document.stored_name;
+  const isSafeStoredName = Boolean(storedName)
+    && storedName === path.basename(storedName)
+    && !storedName.includes("/")
+    && !storedName.includes("\\");
+  if (!isSafeStoredName) throw new UploadedFileMissingError();
+
+  const uploadRoot = path.resolve(config.uploadDir);
+  const localUploadPath = path.resolve(uploadRoot, storedName);
+  if (!localUploadPath.startsWith(`${uploadRoot}${path.sep}`)) {
+    throw new UploadedFileMissingError();
+  }
+  if (await fileExists(localUploadPath)) return localUploadPath;
+
+  throw new UploadedFileMissingError();
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(filePath);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
 }
 
 export async function cleanupPreparedInput(input: PreparedInput): Promise<void> {

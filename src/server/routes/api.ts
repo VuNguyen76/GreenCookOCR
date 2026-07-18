@@ -10,7 +10,7 @@ import { config } from "../config.js";
 import {
   confirmDocument,
   createBatch,
-  findDocumentByHash,
+  deleteDocument,
   getDocument,
   getStats,
   insertDocument,
@@ -19,7 +19,7 @@ import {
 } from "../db/repository.js";
 
 const BatchSchema = z.object({ fileCount: z.number().int().positive().max(500) });
-const IdParams = z.object({ id: z.string().uuid() });
+const IdParams = z.object({ id: z.uuid() });
 const ALLOWED_EXTENSIONS = new Set([
   ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff",
   ".doc", ".docx", ".xlsx", ".txt", ".csv"
@@ -40,7 +40,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     const fields = part.fields as Record<string, { value?: unknown }>;
     const batchId = String(fields.batchId?.value ?? "");
     const batchPosition = Number(fields.batchPosition?.value ?? 1);
-    if (!z.string().uuid().safeParse(batchId).success || !Number.isInteger(batchPosition)) {
+    if (!z.uuid().safeParse(batchId).success || !Number.isInteger(batchPosition)) {
       return reply.code(400).send({ error: "Batch không hợp lệ" });
     }
 
@@ -57,11 +57,6 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       const stat = await fsp.stat(temporaryPath);
       if (stat.size === 0) return reply.code(400).send({ error: "File rỗng" });
       const sha256 = await hashFile(temporaryPath);
-      const duplicate = await findDocumentByHash(sha256);
-      if (duplicate) {
-        return reply.send({ duplicate: true, document: duplicate });
-      }
-
       const detected = await fileTypeFromFile(temporaryPath);
       const mimeType = detected?.mime ?? part.mimetype ?? mimeForExtension(extension);
       const storedName = `${randomUUID()}${extension}`;
@@ -78,7 +73,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         sizeBytes: stat.size,
         sha256
       });
-      return reply.code(201).send({ duplicate: false, document });
+      return reply.code(201).send({ document });
     } finally {
       await fsp.rm(temporaryPath, { force: true }).catch(() => undefined);
     }
@@ -112,6 +107,60 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     }
     return { ok: true };
   });
+
+  app.delete("/api/documents/:id", async (request, reply) => {
+    const { id } = IdParams.parse(request.params);
+    const result = await deleteDocument(id);
+    if (!result.deleted) {
+      if (result.reason === "not_found") {
+        return reply.code(404).send({ error: "Không tìm thấy tài liệu" });
+      }
+      return reply.code(409).send({ error: "Tài liệu đang được OCR. Vui lòng đợi xử lý xong rồi xóa." });
+    }
+
+    await removeStoredUpload(result.storedName).catch((error) => {
+      app.log.warn({ err: error, documentId: id }, "Không thể xóa file lưu trữ của tài liệu");
+    });
+    return { ok: true };
+  });
+}
+
+export async function existingUploadPath(document: {
+  storage_path: string;
+  stored_name: string;
+}): Promise<string | null> {
+  if (await isFile(document.storage_path)) return document.storage_path;
+
+  const fallbackPath = safeDuplicateStoragePath(document.stored_name);
+  return await isFile(fallbackPath) ? fallbackPath : null;
+}
+
+export function safeDuplicateStoragePath(storedName: string): string {
+  const isSafeStoredName = Boolean(storedName)
+    && storedName === path.basename(storedName)
+    && !storedName.includes("/")
+    && !storedName.includes("\\");
+  if (!isSafeStoredName) throw new Error("Unsafe stored file name");
+
+  const uploadRoot = path.resolve(config.uploadDir);
+  const storagePath = path.resolve(uploadRoot, storedName);
+  if (!storagePath.startsWith(`${uploadRoot}${path.sep}`)) {
+    throw new Error("Unsafe stored file name");
+  }
+  return storagePath;
+}
+
+export async function removeStoredUpload(storedName: string): Promise<void> {
+  await fsp.rm(safeDuplicateStoragePath(storedName), { force: true });
+}
+
+async function isFile(filePath: string): Promise<boolean> {
+  try {
+    const stat = await fsp.stat(filePath);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
 }
 
 async function hashFile(filePath: string): Promise<string> {

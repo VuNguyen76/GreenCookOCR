@@ -3,6 +3,7 @@ import type { DocumentRow, DocumentStatus, OcrDocument } from "../../shared/ocr.
 import type { ReconciliationResult } from "../services/reconciliation.js";
 import { config } from "../config.js";
 import { pool } from "./pool.js";
+import { sanitizeClientErrorMessage } from "../services/public-errors.js";
 
 export interface NewDocument {
   batchId: string;
@@ -22,14 +23,6 @@ export async function createBatch(fileCount: number): Promise<string> {
     [id, fileCount]
   );
   return id;
-}
-
-export async function findDocumentByHash(sha256: string): Promise<DocumentRow | null> {
-  const result = await pool.query<DocumentRow>(
-    "select * from ocr_documents where sha256 = $1",
-    [sha256]
-  );
-  return result.rows[0] ?? null;
 }
 
 export async function insertDocument(input: NewDocument): Promise<DocumentRow> {
@@ -57,7 +50,7 @@ export async function listDocuments(limit = 200): Promise<DocumentRow[]> {
      limit $1`,
     [limit]
   );
-  return result.rows;
+  return result.rows.map(sanitizeDocumentRow);
 }
 
 export async function getDocument(id: string): Promise<Record<string, unknown> | null> {
@@ -67,7 +60,7 @@ export async function getDocument(id: string): Promise<Record<string, unknown> |
     "select * from ocr_items where document_id = $1 order by line_no",
     [id]
   );
-  return { ...document.rows[0], items: items.rows };
+  return { ...sanitizeDocumentRecord(document.rows[0]), items: items.rows };
 }
 
 export async function getStats(): Promise<Record<string, number>> {
@@ -261,6 +254,8 @@ function getRawItems(rawResult: unknown): unknown[] {
 
 export async function failDocument(id: string, attempts: number, error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
+  const publicMessage = sanitizeClientErrorMessage(message)
+    ?? "OCR thất bại. Vui lòng kiểm tra lại tài liệu hoặc thử quét lại.";
   const retry = attempts < config.maxAttempts;
   const delaySeconds = Math.min(120, 2 ** attempts * 5);
   await pool.query(
@@ -270,7 +265,7 @@ export async function failDocument(id: string, attempts: number, error: unknown)
         then now() + ($4::text || ' seconds')::interval else next_attempt_at end,
       updated_at = now()
      where id = $1`,
-    [id, retry ? "queued" : "failed", message.slice(0, 2000), delaySeconds]
+    [id, retry ? "queued" : "failed", publicMessage.slice(0, 2000), delaySeconds]
   );
 }
 
@@ -322,6 +317,48 @@ export async function confirmDocument(id: string): Promise<boolean> {
   return Boolean(result.rowCount);
 }
 
+export type DeleteDocumentResult =
+  | { deleted: true; storedName: string }
+  | { deleted: false; reason: "not_found" | "processing" };
+
+export async function deleteDocument(id: string): Promise<DeleteDocumentResult> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const selected = await client.query<Pick<DocumentRow, "batch_id" | "stored_name" | "status">>(
+      `select batch_id, stored_name, status
+       from ocr_documents
+       where id = $1
+       for update`,
+      [id]
+    );
+    const document = selected.rows[0];
+    if (!document) {
+      await client.query("rollback");
+      return { deleted: false, reason: "not_found" };
+    }
+    if (["preprocessing", "ocr_running", "validating"].includes(document.status)) {
+      await client.query("rollback");
+      return { deleted: false, reason: "processing" };
+    }
+
+    await client.query("delete from ocr_documents where id = $1", [id]);
+    await client.query(
+      `delete from ocr_batches b
+       where b.id = $1
+         and not exists (select 1 from ocr_documents d where d.batch_id = b.id)`,
+      [document.batch_id]
+    );
+    await client.query("commit");
+    return { deleted: true, storedName: document.stored_name };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function createRun(documentId: string, model: string, promptVersion: string): Promise<string> {
   const id = randomUUID();
   await pool.query(
@@ -339,15 +376,32 @@ export async function finishRun(
   interactionId?: string,
   errorMessage?: string
 ): Promise<void> {
+  const publicErrorMessage = sanitizeClientErrorMessage(errorMessage ?? null);
   await pool.query(
     `update ocr_runs set status = $2, duration_ms = $3,
       gemini_interaction_id = $4, error_message = $5, completed_at = now()
      where id = $1`,
-    [id, status, durationMs, interactionId ?? null, errorMessage?.slice(0, 2000) ?? null]
+    [id, status, durationMs, interactionId ?? null, publicErrorMessage?.slice(0, 2000) ?? null]
   );
 }
 
 function normalizeDateForDb(value: string | null): string | null {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
   return value;
+}
+
+export function sanitizeDocumentRow<T extends { error_message: string | null }>(row: T): T {
+  return {
+    ...row,
+    error_message: sanitizeClientErrorMessage(row.error_message)
+  };
+}
+
+function sanitizeDocumentRecord(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...row,
+    error_message: typeof row.error_message === "string"
+      ? sanitizeClientErrorMessage(row.error_message)
+      : null
+  };
 }

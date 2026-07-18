@@ -8,10 +8,12 @@ import {
   recoverStaleDocuments,
   setDocumentStatus
 } from "../db/repository.js";
+import { terminateAnonymousWorkersOnDatabaseHost } from "../db/pool.js";
 import { GeminiOcrService } from "./gemini.js";
 import { normalizeOcrResult } from "./normalizer.js";
 import { cleanupPreparedInput, prepareDocument } from "./preprocessor.js";
 import { PROMPT_VERSION } from "./prompt.js";
+import { toPublicOcrErrorMessage } from "./public-errors.js";
 import { createSourceOnlyReconciliation } from "./reconciliation.js";
 import { extractStructuredSpreadsheet } from "./structured-extractor.js";
 
@@ -40,6 +42,10 @@ export class SequentialOcrWorker {
     if (this.running || this.stopping) return this.schedule();
     this.running = true;
     try {
+      const terminated = await terminateAnonymousWorkersOnDatabaseHost();
+      if (terminated > 0) {
+        console.warn(`Terminated ${terminated} anonymous OCR worker connection(s) on database host`);
+      }
       await recoverStaleDocuments();
       const document = await claimNextDocument();
       if (!document) return;
@@ -75,10 +81,11 @@ export class SequentialOcrWorker {
           `OCR completed: ${document.original_name} (${reconciliation.document.items.length} items, source-only normalization)`
         );
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await failDocument(document.id, document.attempts, error);
-        await finishRun(runId, "failed", Date.now() - started, undefined, message);
-        console.error(`OCR failed: ${document.original_name}: ${message}`);
+        const rawMessage = error instanceof Error ? error.message : String(error);
+        const publicMessage = toPublicOcrErrorMessage(error);
+        await failDocument(document.id, document.attempts, new Error(publicMessage));
+        await finishRun(runId, "failed", Date.now() - started, undefined, publicMessage);
+        console.error(`OCR failed: ${document.original_name}: ${rawMessage}`);
       } finally {
         if (prepared) await cleanupPreparedInput(prepared).catch(() => undefined);
       }

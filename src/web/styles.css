@@ -20,14 +20,18 @@ button { cursor: pointer; }
 .brand strong { font-size: 15px; }
 .brand span { font-size: 11px; color: #6c7773; }
 .header-actions { gap: 8px; }
-.primary-button, .secondary-button, .icon-button { border: 1px solid transparent; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.primary-button, .secondary-button, .danger-button, .icon-button { border: 1px solid transparent; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 .primary-button { height: 38px; padding: 0 14px; background: #126444; color: #fff; border-radius: 6px; font-weight: 650; }
 .primary-button:hover { background: #0d5036; }
 .primary-button:disabled { opacity: .65; cursor: wait; }
 .secondary-button { min-height: 36px; padding: 0 12px; border-color: #cad4cf; background: #fff; color: #183c2f; border-radius: 6px; font-weight: 600; }
+.danger-button { min-height: 36px; margin-left: auto; padding: 0 12px; border-color: #e6b9b1; background: #fff; color: #9a3527; border-radius: 6px; font-weight: 600; }
+.danger-button:hover { background: #fff0ed; }
+.danger-button:disabled, .icon-button:disabled { opacity: .55; cursor: wait; }
 .icon-button { width: 38px; height: 38px; background: transparent; color: #53615c; border-radius: 6px; }
 .icon-button:hover { background: #edf1ef; color: #17201d; }
 .icon-button.compact { width: 30px; height: 30px; }
+.danger-icon:hover { background: #fff0ed; color: #9a3527; }
 
 main { max-width: 1680px; margin: 0 auto; }
 .metrics-band { min-height: 86px; display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); border-bottom: 1px solid #dce2df; background: #fff; }

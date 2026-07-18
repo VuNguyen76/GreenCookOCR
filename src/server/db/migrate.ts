@@ -42,10 +42,11 @@ export async function migrate(): Promise<void> {
       started_at timestamptz,
       completed_at timestamptz,
       created_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now(),
-      UNIQUE (sha256)
+      updated_at timestamptz NOT NULL DEFAULT now()
     );
 
+    ALTER TABLE ocr_documents DROP CONSTRAINT IF EXISTS ocr_documents_sha256_key;
+    CREATE INDEX IF NOT EXISTS idx_ocr_documents_sha256 ON ocr_documents(sha256);
     CREATE INDEX IF NOT EXISTS idx_ocr_documents_queue
       ON ocr_documents(status, next_attempt_at, created_at, batch_position);
 
