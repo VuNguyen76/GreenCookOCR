@@ -63,6 +63,17 @@ describe("normalizeOcrResult", () => {
     ]);
   });
 
+  it("translates missing financial-field warnings to Vietnamese", () => {
+    const result = normalizeOcrResult({
+      ...base,
+      warnings: ["Document does not contain price, tax, or amount fields."]
+    });
+
+    expect(result.warnings).toEqual([
+      "Chứng từ không có trường đơn giá, thuế hoặc thành tiền."
+    ]);
+  });
+
   it("translates VAT price-basis notes to Vietnamese", () => {
     const result = normalizeOcrResult({
       ...base,

@@ -8,6 +8,11 @@ export function localizeOcrWarning(warning: string): string | null {
   if (/^no price or amount values are specified in this delivery request document\.?$/i.test(cleaned)) {
     return "Chứng từ đề nghị giao hàng không ghi đơn giá hoặc thành tiền.";
   }
+  if (
+    /^(?:the )?document (?:does not contain|contains no|has no).*\bprice\b.*\btax\b.*\bamount\b.*$/i.test(cleaned)
+  ) {
+    return "Chứng từ không có trường đơn giá, thuế hoặc thành tiền.";
+  }
   if (/^document id is\s+\S+\.?$/i.test(cleaned)) return null;
 
   if (
