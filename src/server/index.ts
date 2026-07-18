@@ -18,10 +18,9 @@ await fs.mkdir(config.workDir, { recursive: true });
 await migrate();
 
 app.log.info({
-  ocrProvider: config.ocrProvider,
-  ocrModel: config.ocrProvider === "openai-compatible"
-    ? config.openAiCompatibleModel
-    : config.geminiModel,
+  ocrProvider: "gemini-interactions",
+  ocrModel: config.geminiModel,
+  mediaResolution: config.geminiMediaResolution,
   uploadDir: config.uploadDir,
   workDir: config.workDir
 }, "GreenCookOCR configuration loaded");

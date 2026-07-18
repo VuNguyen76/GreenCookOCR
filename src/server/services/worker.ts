@@ -51,9 +51,7 @@ export class SequentialOcrWorker {
       if (!document) return;
 
       const started = Date.now();
-      const model = config.ocrProvider === "openai-compatible"
-        ? config.openAiCompatibleModel
-        : config.geminiModel;
+      const model = config.geminiModel;
       const runId = await createRun(document.id, model, PROMPT_VERSION);
       let prepared: Awaited<ReturnType<typeof prepareDocument>> | undefined;
       try {

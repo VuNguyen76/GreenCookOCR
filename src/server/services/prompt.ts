@@ -1,4 +1,4 @@
-export const PROMPT_VERSION = "greencook-ocr-1.3.0";
+export const PROMPT_VERSION = "greencook-ocr-gemini-1.0.0";
 
 export const OCR_PROMPT = `
 Bạn là bộ trích xuất dữ liệu chứng từ mua hàng cho GreenCook.
