@@ -3,7 +3,7 @@ import { pool } from "../src/server/db/pool.js";
 
 try {
   await applyIdempiereMigration();
-  console.log("Đã cài schema và Window Đơn Hàng OCR vào iDempiere.");
+  console.log("Đã cài schema và Window Đơn Đặt Hàng vào iDempiere.");
 } finally {
   await pool.end();
 }

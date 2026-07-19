@@ -30,9 +30,35 @@ describe("extractStructuredSpreadsheet", () => {
       unit_price: "176727",
       amount: null
     });
+    expect(result?.raw_tables).toHaveLength(1);
+    expect(result?.raw_tables?.[0].headers).toContain("INPUT TYPE NAME");
+    expect(result?.raw_tables?.[0].rows).toHaveLength(2);
+    expect(result?.items[0].extra_fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: "INPUT TYPE NAME", value: "Nhập mua hàng (trong nước)" })
+    ]));
   });
 
   it("does not claim an unrelated spreadsheet", () => {
     expect(extractStructuredSpreadsheet("### SHEET: Sheet1\n1\tNAME\tVALUE", "other.xlsx")).toBeNull();
+  });
+
+  it("keeps sparse product rows and carries the preceding PO context", () => {
+    const sparseExport = [
+      dmxExport,
+      "4\t\t\t\t\t\t\t\t\t\t\tGCP255-20IH\t1033263000995\t\t3\t250000"
+    ].join("\n");
+
+    const result = extractStructuredSpreadsheet(sparseExport, "PO DMX sparse.xlsx");
+
+    expect(result?.items).toHaveLength(3);
+    expect(result?.items[2]).toMatchObject({
+      po_number: "02393PO2603889566",
+      store_code: "2393",
+      product_code: "1033263000995",
+      vendor_product_code: "GCP255-20IH",
+      product_name: null,
+      quantity: "3",
+      unit_price: "250000"
+    });
   });
 });

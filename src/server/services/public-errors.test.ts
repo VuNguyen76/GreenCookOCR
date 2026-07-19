@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sanitizeClientErrorMessage, toPublicOcrErrorMessage } from "./public-errors.js";
 
-describe("public OCR errors", () => {
+describe("public document reader errors", () => {
   it("hides ENOENT and internal paths from messages returned to the UI", () => {
     const message = sanitizeClientErrorMessage(
       "ENOENT: no such file or directory, stat 'D:\\GreenCook\\GreenCookOCR\\storage\\uploads\\missing.pdf'"
@@ -20,7 +20,7 @@ describe("public OCR errors", () => {
   it("turns malformed model responses into a Vietnamese user-facing error", () => {
     const message = sanitizeClientErrorMessage("OCR response did not contain a JSON object");
 
-    expect(message).toBe("Model OCR trả về sai định dạng dữ liệu. Vui lòng chạy lại OCR hoặc đổi model.");
+    expect(message).toBe("Dịch vụ đọc chứng từ trả về sai định dạng dữ liệu. Vui lòng đọc lại tài liệu hoặc đổi model.");
     expect(message).not.toContain("OCR response did not contain");
   });
 

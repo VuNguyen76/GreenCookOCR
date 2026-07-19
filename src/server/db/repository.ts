@@ -69,9 +69,14 @@ export class StagingRepository {
     const items = this.database.prepare(
       "SELECT * FROM ocr_items WHERE document_id = ? ORDER BY line_no"
     ).all(id) as Array<Record<string, unknown>>;
+    const document = sanitizeDocumentRecord(hydrateDocumentRow(row));
+    const normalizedItems = normalizedItemsByLine(document.normalized_result);
     return {
-      ...sanitizeDocumentRecord(hydrateDocumentRow(row)),
-      items: items.map(hydrateItemRow)
+      ...document,
+      items: items.map((item) => {
+        const hydrated = hydrateItemRow(item);
+        return { ...normalizedItems.get(Number(hydrated.line_no)), ...hydrated };
+      })
     };
   }
 
@@ -278,7 +283,7 @@ export class StagingRepository {
         AND EXISTS (
           SELECT 1 FROM ocr_documents document
           WHERE document.id = ocr_items.document_id
-            AND document.status IN ('needs_review', 'publish_failed')
+            AND document.status IN ('needs_review', 'publish_failed', 'published')
         )
     `).run(product.id, product.value, product.name, method, itemId, documentId);
     return result.changes > 0;
@@ -502,6 +507,18 @@ function getRawItems(rawResult: unknown): unknown[] {
   if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) return [];
   const items = (rawResult as Record<string, unknown>).items;
   return Array.isArray(items) ? items : [];
+}
+
+function normalizedItemsByLine(value: unknown): Map<number, Record<string, unknown>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return new Map();
+  const items = (value as Record<string, unknown>).items;
+  if (!Array.isArray(items)) return new Map();
+  return new Map(items.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    const lineNo = Number(row.line_no);
+    return Number.isInteger(lineNo) ? [[lineNo, row] as const] : [];
+  }));
 }
 
 export function sanitizeDocumentRow<T extends { error_message: string | null }>(row: T): T {

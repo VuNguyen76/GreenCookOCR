@@ -41,7 +41,8 @@ export function normalizeOcrResult(raw: unknown): OcrDocument {
 
   const derivedSubtotal = sumItemAmounts(items);
   let subtotalAmount = normalizeNumeric(parsed.subtotal_amount);
-  let taxAmount = normalizeNumeric(parsed.tax_amount);
+  const printedTaxAmount = normalizeNumeric(parsed.tax_amount);
+  let taxAmount = printedTaxAmount;
   let totalAmount = normalizeNumeric(parsed.total_amount);
 
   if (parsed.template_key === "po_dmx_pdf_customer_manual") {
@@ -73,6 +74,8 @@ export function normalizeOcrResult(raw: unknown): OcrDocument {
       }
     }
   }
+
+  fillUniformVatRates(items, subtotalAmount, printedTaxAmount);
 
   const buyerName = cleanNullable(parsed.buyer_name);
   const issuerName = cleanNullable(parsed.issuer_name)
@@ -106,9 +109,34 @@ export function normalizeOcrResult(raw: unknown): OcrDocument {
     supplier_name: cleanNullable(parsed.supplier_name),
     buyer_name: buyerName,
     delivery_address: cleanNullable(parsed.delivery_address),
+    document_number: cleanIdentifier(parsed.document_number ?? null),
+    reference_number: cleanIdentifier(parsed.reference_number ?? null),
+    buyer_code: cleanIdentifier(parsed.buyer_code ?? null),
+    supplier_code: cleanIdentifier(parsed.supplier_code ?? null),
+    buyer_tax_id: cleanIdentifier(parsed.buyer_tax_id ?? null),
+    supplier_tax_id: cleanIdentifier(parsed.supplier_tax_id ?? null),
+    order_contact: cleanNullable(parsed.order_contact ?? null),
+    contact_phone: cleanNullable(parsed.contact_phone ?? null),
+    contact_email: cleanNullable(parsed.contact_email ?? null),
+    bill_to_address: cleanNullable(parsed.bill_to_address ?? null),
+    ship_to_address: cleanNullable(parsed.ship_to_address ?? null),
+    warehouse_code: cleanIdentifier(parsed.warehouse_code ?? null),
+    warehouse_name: cleanNullable(parsed.warehouse_name ?? null),
+    department: cleanNullable(parsed.department ?? null),
+    payment_terms: cleanNullable(parsed.payment_terms ?? null),
+    payment_method: cleanNullable(parsed.payment_method ?? null),
+    delivery_method: cleanNullable(parsed.delivery_method ?? null),
+    delivery_window: cleanNullable(parsed.delivery_window ?? null),
+    price_list_name: cleanNullable(parsed.price_list_name ?? null),
+    price_includes_tax: parsed.price_includes_tax ?? null,
     subtotal_amount: subtotalAmount,
+    discount_amount: normalizeNumeric(parsed.discount_amount ?? null),
+    charge_amount: normalizeNumeric(parsed.charge_amount ?? null),
+    freight_amount: normalizeNumeric(parsed.freight_amount ?? null),
     tax_amount: taxAmount,
     total_amount: totalAmount,
+    raw_fields: parsed.raw_fields ?? [],
+    raw_tables: parsed.raw_tables ?? [],
     items,
     warnings: [...warnings],
     confidence
@@ -129,12 +157,25 @@ function normalizeItem(source: OcrItem, fallbackLine: number): OcrItem {
     barcode: normalizeBarcode(source.barcode),
     product_name: cleanProductName(source.product_name),
     model: cleanIdentifier(source.model),
+    article_code: cleanIdentifier(source.article_code ?? null),
+    sku: cleanIdentifier(source.sku ?? null),
+    ou_type: cleanNullable(source.ou_type ?? null),
     quantity: normalizeNumeric(source.quantity),
+    free_quantity: normalizeNumeric(source.free_quantity ?? null),
     units_per_order_unit: normalizeNumeric(source.units_per_order_unit),
     unit: cleanNullable(source.unit)?.toUpperCase() ?? null,
+    list_price: normalizeNumeric(source.list_price ?? null),
     unit_price: normalizeNumeric(source.unit_price),
+    discount_percent: normalizeNumeric(source.discount_percent ?? null),
+    discount_amount: normalizeNumeric(source.discount_amount ?? null),
     vat_rate: normalizeNumeric(source.vat_rate),
+    tax_amount: normalizeNumeric(source.tax_amount ?? null),
     amount: normalizeNumeric(source.amount),
+    gross_amount: normalizeNumeric(source.gross_amount ?? null),
+    promised_date: normalizeDate(source.promised_date ?? null),
+    warehouse_code: cleanIdentifier(source.warehouse_code ?? null),
+    warehouse_name: cleanNullable(source.warehouse_name ?? null),
+    extra_fields: source.extra_fields ?? [],
     confidence: Math.max(0, Math.min(1, source.confidence))
   };
 }
@@ -271,6 +312,31 @@ function sumItemAmountsBeforeVat(items: OcrItem[]): string | null {
       .times(item.unit_price!)
   ), new Decimal(0));
   return decimalText(total);
+}
+
+function fillUniformVatRates(
+  items: OcrItem[],
+  subtotalAmount: string | null,
+  printedTaxAmount: string | null
+): void {
+  if (!items.length || subtotalAmount === null || printedTaxAmount === null) return;
+  const subtotal = new Decimal(subtotalAmount);
+  if (subtotal.lessThanOrEqualTo(0)) return;
+
+  const supportedRates = [0, 5, 8, 10];
+  const rate = supportedRates.find((candidate) => {
+    const expectedTax = subtotal.times(candidate).dividedBy(100);
+    return expectedTax.minus(printedTaxAmount).abs().lessThanOrEqualTo(1);
+  });
+  if (rate === undefined) return;
+
+  const existingRates = new Set(items
+    .map((item) => item.vat_rate)
+    .filter((value): value is string => value !== null));
+  if ([...existingRates].some((value) => new Decimal(value).minus(rate).abs().greaterThan(0.0001))) {
+    return;
+  }
+  for (const item of items) item.vat_rate ??= String(rate);
 }
 
 function decimalsDiffer(left: string, right: string): boolean {

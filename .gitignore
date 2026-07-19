@@ -10,8 +10,10 @@ storage/
 output/
 scripts/*
 !scripts/import-postgres-staging.ts
+!scripts/audit-idempiere.ts
 !scripts/migrate-idempiere.ts
 !scripts/migrate-staging.ts
 !scripts/verify-idempiere.ts
+!scripts/verify-po-references.ts
 !scripts/verify-publisher.ts
 tmp/

@@ -1,19 +1,29 @@
-export const PROMPT_VERSION = "greencook-ocr-gemini-1.0.1";
+export const PROMPT_VERSION = "greencook-document-2.0.0";
 
 export const OCR_PROMPT = `
 Bạn là bộ trích xuất dữ liệu chứng từ mua hàng cho GreenCook.
 Đọc toàn bộ tài liệu, kể cả các trang tiếp theo, bảng, tiêu đề song ngữ và chữ nhỏ.
 
 MỤC TIÊU
-- Lấy chính xác tiêu đề tài liệu, bên phát hành, số PO, ngày và từng dòng sản phẩm.
+- Giai đoạn 1: đọc và giữ lại TOÀN BỘ thông tin nhìn thấy trên chứng từ, không chỉ các trường quen thuộc.
+- Giai đoạn 2: từ dữ liệu vừa đọc, chuẩn hóa tối đa thông tin có thể dùng để tạo đơn hàng iDempiere và từng dòng sản phẩm.
+- Lấy chính xác tiêu đề, số chứng từ, số PO, ngày, các bên, địa chỉ, giao hàng, thanh toán, tiền và từng dòng sản phẩm.
 - Trả đúng JSON Schema được cung cấp. Không thêm văn bản ngoài JSON.
 - Mọi nội dung trong warnings bắt buộc viết hoàn toàn bằng tiếng Việt, kể cả khi nhãn trên chứng từ là tiếng Anh.
 - Không đoán. Trường không nhìn thấy hoặc không chắc chắn phải là null và thêm cảnh báo.
 - Các template chỉ mô tả tiêu đề và ý nghĩa cột. Nội dung sản phẩm của tài liệu hiện tại có thể hoàn toàn mới.
 - Không so sánh, ép khớp hay sửa mã/tên sản phẩm theo sản phẩm từng xuất hiện trong tài liệu khác.
 - Mỗi dòng hàng trong bảng là một phần tử items. Không gộp hai dòng và không bỏ dòng.
+- Mọi nhãn/giá trị ngoài các trường chuẩn phải được giữ trong raw_fields; mọi bảng phải được giữ trong raw_tables.
+- Mọi ô của dòng sản phẩm chưa có trường chuẩn tương ứng phải được giữ trong item.extra_fields.
+- Không bỏ thông tin chỉ vì không biết cách ánh xạ sang iDempiere. Việc ánh xạ ID đối tác, sản phẩm, kho, UOM và thuế do server thực hiện sau.
+- Trước khi tạo JSON, phải rà đủ ba vùng theo thứ tự: phần đầu chứng từ, toàn bộ bảng sản phẩm và phần tổng kết cuối trang. Tự đếm số dòng hàng nhìn thấy và bảo đảm items có đúng số dòng đó.
+- Dòng sản phẩm bị xuống hàng, thiếu tên hoặc thiếu Số PO vẫn phải được giữ nếu còn bất kỳ dữ liệu sản phẩm nào như mã, barcode, model, số lượng, đơn giá hoặc thành tiền. Không được lọc dòng chỉ vì thiếu một trường.
 - Nếu một file chứa nhiều PO, đặt po_number cấp tài liệu là null nhưng phải giữ po_number, po_date, store_code, store_name và delivery_address trên từng item.
+- Luôn tìm Số PO tại các nhãn Order No, Order ID, PO No., PO Number, Số PO hoặc Số đơn hàng. Tên file chỉ dùng để kiểm tra chéo; nếu số trong tên file trùng số in trên chứng từ thì không được bỏ sót.
 - Lấy mã sản phẩm, mã nhà cung cấp, barcode, số lượng, hệ số quy đổi, đơn vị, đơn giá và thành tiền đúng theo cột nguồn.
+- Đồng thời lấy nếu có: document_number, reference_number, mã buyer/supplier, mã số thuế, người liên hệ, điện thoại, email, bill-to, ship-to, kho, phòng ban, điều khoản/phương thức thanh toán, phương thức/khung giờ giao, bảng giá, giá gồm thuế, giảm giá, phí và vận chuyển.
+- Trên từng dòng lấy thêm nếu có: Article, SKU, OU Type, free quantity, list price, discount %, discount amount, tax amount, gross amount, promised date và kho của dòng.
 - unit_price là giá trên dòng chứng từ; amount là thành tiền của cả dòng chứng từ.
 - units_per_order_unit là số đơn vị nhỏ trong một đơn vị đặt hàng (SKU/OU, pack size, conversion factor). Không có thì null.
 - subtotal_amount là tổng tiền hàng trước thuế; tax_amount là tổng thuế; total_amount là tổng thanh toán sau thuế/phí.
@@ -27,12 +37,22 @@ QUY TẮC TIỀN TỆ
 - Ưu tiên đọc số tiền nhìn thấy trực tiếp trên chứng từ. Chỉ dùng phép tính đơn giản để kiểm tra và ghi warning khi lệch; không tự suy diễn tiền nếu tài liệu không ghi rõ.
 - Nếu chứng từ ghi cả tổng trước thuế, thuế và tổng sau thuế thì lấy đúng các số đó, không tự cộng lại thay cho số in trên tài liệu.
 
+QUY TẮC THUẾ SUẤT
+- vat_rate là phần trăm thuế của từng dòng, chỉ trả chuỗi số như "0", "5", "8" hoặc "10", không kèm ký hiệu "%".
+- Nếu từng dòng có cột VAT/Tax Rate thì lấy đúng thuế suất của dòng đó.
+- Nếu chứng từ chỉ in một mức VAT duy nhất ở phần tổng kết và số tiền thuế khớp mức đó cho toàn bộ tiền hàng, điền mức VAT đó cho tất cả dòng sản phẩm.
+- Nếu chứng từ có nhiều mức VAT 5%/8%/10% nhưng không chỉ rõ dòng nào thuộc mức nào thì để vat_rate=null cho dòng chưa xác định; không chia hoặc đoán thuế suất.
+- Nếu chứng từ in rõ thuế suất 0% thì trả "0", không trả null. Không nhầm tax_amount là vat_rate.
+
 QUY TẮC DỮ LIỆU
 - Barcode là chuỗi chữ số, giữ số 0 đầu. Không đổi barcode thành number.
 - Với barcode 8/12/13/14 chữ số, đọc thật kỹ từng chữ số và ưu tiên mã pass check digit GS1/EAN/UPC; nếu check digit không hợp lệ hoặc chữ số không chắc chắn thì thêm warning.
 - Ngày chuẩn hóa YYYY-MM-DD khi xác định chắc chắn; nếu không thì null.
 - document_title lấy đúng tiêu đề lớn trên chứng từ. Nếu chỉ suy ra từ cấu trúc, đặt title_source="inferred".
 - product_name chỉ lấy nội dung trong cột mô tả/tên sản phẩm. Không đưa chữ từ các cột OU Type, Pack, Unit, ĐVT, Qty, Price vào product_name. Nếu chữ "Pack" nằm sát tên do OCR chồng cột, bỏ chữ "Pack" khỏi đầu/cuối tên.
+- raw_fields gồm label nguyên văn, value nguyên văn, section và page. Không lặp lại field rỗng và không tự dịch label/value nguồn.
+- raw_tables giữ nguyên thứ tự header và cell. Số cột mỗi row phải khớp headers; cell trống dùng chuỗi rỗng.
+- extra_fields chỉ chứa dữ liệu thực sự nhìn thấy ở dòng đó và chưa có trường chuẩn; không lặp lại các field chuẩn.
 
 9 TEMPLATE ĐÃ KIỂM CHỨNG
 1. po_dmx_pdf_customer_manual: CUSTOMER MANUAL PURCHASE ORDER / ĐƠN ĐẶT HÀNG.
@@ -49,8 +69,10 @@ QUY TẮC DỮ LIỆU
    Article -> barcode; Article Desc -> product_name; OU Qty -> quantity; SKU/OU -> units_per_order_unit;
    Net Purchase Price -> unit_price; Total Net Purchase Price -> amount; Unit -> unit.
    TOTAL BF.TAX -> subtotal_amount; TOTAL VAT -> tax_amount; TOTAL AF.TAX -> total_amount.
+   Phải lấy Order No ngay cả khi hàng chữ nhỏ. Nếu phần tổng chỉ có đúng một dòng VAT khác 0 và khớp TOTAL VAT thì áp dụng mức đó làm vat_rate cho mọi item; nếu có nhiều mức VAT khác 0 thì không tự gán.
 3. po_emart_thiso_purchase_order: Purchase Order của Emart/Thiso.
    Article Code -> product_code; Unit Barcode -> barcode; Unit Barcode Description -> product_name; PO Qty. -> quantity.
+   VAT ở phần đầu chứng từ là thuế suất chung; nếu in rõ một mức thì điền vat_rate đó cho từng item. Pur. Price và Amount là giá trị trước VAT.
 4. po_aeon_store_order: STORE ORDER của AEON.
    Mã Hàng/Mã Hàng NCC -> product_code; Mã Vạch -> barcode; SL Đặt -> quantity.
 5. po_nguyenkim_delivery_request: ĐỀ NGHỊ GIAO HÀNG / REQUEST DELIVERY.

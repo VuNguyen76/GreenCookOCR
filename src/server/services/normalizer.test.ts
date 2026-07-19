@@ -451,4 +451,106 @@ describe("normalizeOcrResult", () => {
     expect(result.warnings).toEqual([]);
     expect(result.confidence).toBeGreaterThanOrEqual(0.8);
   });
+
+  it("fills a single printed VAT rate without overriding mixed line rates", () => {
+    const item = {
+      line_no: 1,
+      product_code: "10062814",
+      vendor_product_code: null,
+      barcode: null,
+      product_name: "Nồi inox GreenCook",
+      model: "GCS232-28IH",
+      quantity: "1",
+      units_per_order_unit: null,
+      unit: "Cái",
+      unit_price: "7295724",
+      vat_rate: null,
+      amount: "7295724",
+      source_page: 1,
+      confidence: 0.98
+    };
+    const uniform = normalizeOcrResult({
+      ...base,
+      subtotal_amount: "7295724",
+      tax_amount: "583658",
+      total_amount: "7879382",
+      items: [{
+        ...item
+      }]
+    });
+    expect(uniform.items[0].vat_rate).toBe("8");
+
+    const mixed = normalizeOcrResult({
+      ...base,
+      subtotal_amount: "1000",
+      tax_amount: "80",
+      total_amount: "1080",
+      items: [
+        { ...item, vat_rate: "5", unit_price: "500", amount: "500" },
+        { ...item, line_no: 2, vat_rate: null, unit_price: "500", amount: "500" }
+      ]
+    });
+    expect(mixed.items.map((item) => item.vat_rate)).toEqual(["5", null]);
+  });
+
+  it("preserves open OCR fields while normalizing values used by an order", () => {
+    const result = normalizeOcrResult({
+      ...base,
+      document_number: "  PN-001  ",
+      buyer_tax_id: " 0312345678 ",
+      payment_terms: " Thanh toán 30 ngày ",
+      freight_amount: "1000.00",
+      raw_fields: [{ label: "Ghi chú giao hàng", value: "Giao trước 8 giờ", section: "Header", page: 1 }],
+      raw_tables: [{ title: "Bảng hàng", page: 1, headers: ["SKU", "Qty"], rows: [["GCP02-20IH", "2"]] }],
+      items: [{
+        line_no: 1,
+        po_number: null,
+        po_date: null,
+        store_code: null,
+        store_name: null,
+        delivery_address: null,
+        product_code: null,
+        vendor_product_code: null,
+        barcode: null,
+        product_name: "Chảo GreenCook",
+        model: "GCP02-20IH",
+        article_code: " A-001 ",
+        sku: " GCP02-20IH ",
+        ou_type: " Pack ",
+        quantity: "2",
+        free_quantity: "1.00",
+        units_per_order_unit: "6",
+        unit: "pack",
+        list_price: "100000.00",
+        unit_price: "90000.00",
+        discount_percent: "10.00",
+        discount_amount: "20000.00",
+        vat_rate: "8",
+        tax_amount: "14400.00",
+        amount: "1080000.00",
+        gross_amount: "1094400.00",
+        promised_date: "10/03/2026",
+        warehouse_code: " HN-01 ",
+        warehouse_name: " Kho Hà Nội ",
+        extra_fields: [{ label: "Free PO", value: "N", section: "Dòng sản phẩm", page: 1 }],
+        source_page: 1,
+        confidence: 0.9
+      }]
+    });
+
+    expect(result.document_number).toBe("PN-001");
+    expect(result.freight_amount).toBe("1000");
+    expect(result.raw_fields).toHaveLength(1);
+    expect(result.raw_tables?.[0].rows).toEqual([["GCP02-20IH", "2"]]);
+    expect(result.items[0]).toMatchObject({
+      article_code: "A-001",
+      sku: "GCP02-20IH",
+      ou_type: "Pack",
+      free_quantity: "1",
+      promised_date: "2026-03-10",
+      warehouse_code: "HN-01",
+      warehouse_name: "Kho Hà Nội"
+    });
+    expect(result.items[0].extra_fields).toHaveLength(1);
+  });
 });

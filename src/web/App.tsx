@@ -1,13 +1,14 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock3,
   FileSpreadsheet,
   FileText,
   Image as ImageIcon,
   LoaderCircle,
-  Link2,
   RefreshCw,
   RotateCcw,
   ScanLine,
@@ -20,14 +21,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { localizeOcrWarning } from "../shared/warning-messages.js";
 
 type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "completed" | "needs_review" | "failed" | "publishing" | "published" | "publish_failed";
-
-interface CatalogEntry {
-  id: string;
-  value: string;
-  name: string;
-  barcode?: string | null;
-  productCode?: string | null;
-}
 
 interface DocumentSummary {
   id: string;
@@ -56,9 +49,20 @@ interface DocumentDetail extends DocumentSummary {
   tax_amount: string | null;
   total_amount: string | null;
   normalized_result: Record<string, unknown> | null;
-  target_bpartner_id: string | null;
-  target_bpartner_name: string | null;
   published_order_ids: string[];
+  po_references: Array<{
+    poNumber: string;
+    matched: boolean;
+    reference: {
+      sourceTable: "C_Order";
+      sourceRecordId: string;
+      sourceValue: string;
+      documentNo: string;
+      documentStatus: string;
+      partnerName: string | null;
+      sourceDocumentId: string | null;
+    } | null;
+  }>;
   items: Array<{
     id: string;
     line_no: number;
@@ -72,31 +76,44 @@ interface DocumentDetail extends DocumentSummary {
     barcode: string | null;
     product_name: string | null;
     model: string | null;
+    article_code?: string | null;
+    sku?: string | null;
+    ou_type?: string | null;
     quantity: string | null;
+    free_quantity?: string | null;
     units_per_order_unit: string | null;
     unit: string | null;
+    list_price?: string | null;
     unit_price: string | null;
+    discount_percent?: string | null;
+    discount_amount?: string | null;
+    vat_rate: string | null;
+    tax_amount?: string | null;
     amount: string | null;
+    gross_amount?: string | null;
+    promised_date?: string | null;
+    warehouse_code?: string | null;
+    warehouse_name?: string | null;
+    extra_fields?: Array<{ label?: string; value?: string }>;
+    source_page?: number | null;
     confidence: string;
-    matched_kg_sp_id: string | null;
-    matched_product_value: string | null;
-    matched_product_name: string | null;
   }>;
 }
 
 const STATUS_LABELS: Record<Status, string> = {
   queued: "Đang chờ",
-  preprocessing: "Tiền xử lý",
-  ocr_running: "Đang trích xuất",
-  validating: "Kiểm tra JSON",
-  completed: "Hoàn tất",
-  needs_review: "Cần kiểm tra",
-  failed: "Thất bại",
-  publishing: "Đang đưa vào hệ thống",
-  published: "Đã vào iDempiere",
-  publish_failed: "Đồng bộ lỗi"
+  preprocessing: "Đang chuẩn bị",
+  ocr_running: "Đang đọc dữ liệu",
+  validating: "Đang kiểm tra",
+  completed: "Sẵn sàng",
+  needs_review: "Cần xem lại",
+  failed: "Không xử lý được",
+  publishing: "Đang lưu",
+  published: "Đã đưa vào hệ thống",
+  publish_failed: "Chưa lưu được"
 };
 const VI_NUMBER_FORMAT = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 6 });
+type DocumentFilter = "all" | "review" | "processing" | "published";
 
 export function App() {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
@@ -106,7 +123,10 @@ export function App() {
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0, name: "" });
   const [dragging, setDragging] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [retryingIds, setRetryingIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<DocumentFilter>("all");
   const inputRef = useRef<HTMLInputElement>(null);
 
   const loadDocuments = useCallback(async () => {
@@ -174,18 +194,35 @@ export function App() {
   }, [loadDocuments, uploading]);
 
   const retry = useCallback(async (id: string) => {
-    const response = await fetch(`/api/documents/${id}/retry`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}"
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      setError(payload.error ?? "Không thể chạy lại");
-      return;
+    setRetryingIds((current) => new Set(current).add(id));
+    setDocuments((current) => current.map((document) => (
+      document.id === id ? { ...document, status: "queued", error_message: null } : document
+    )));
+    setSelected((current) => current?.id === id ? { ...current, status: "queued", error_message: null } : current);
+    try {
+      const response = await fetch(`/api/documents/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        setError(payload.error ?? "Không thể đọc lại tài liệu");
+        await openDocument(id);
+        return;
+      }
+      await loadDocuments();
+      await openDocument(id);
+    } finally {
+      window.setTimeout(() => {
+        setRetryingIds((current) => {
+          const next = new Set(current);
+          next.delete(id);
+          return next;
+        });
+      }, 1200);
     }
-    await loadDocuments();
-  }, [loadDocuments]);
+  }, [loadDocuments, openDocument]);
 
   const confirm = useCallback(async (id: string) => {
     const response = await fetch(`/api/documents/${id}/confirm`, {
@@ -196,10 +233,12 @@ export function App() {
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       setError(payload.error ?? "Không thể xác nhận tài liệu");
+      await openDocument(id);
       return;
     }
     await loadDocuments();
-  }, [loadDocuments]);
+    await openDocument(id);
+  }, [loadDocuments, openDocument]);
 
   const removeDocument = useCallback(async (id: string, name: string) => {
     if (!window.confirm(`Xóa tài liệu "${name}" và file đã upload?`)) return;
@@ -223,19 +262,31 @@ export function App() {
   const total = useMemo(() => Object.values(stats).reduce((sum, count) => sum + count, 0), [stats]);
   const processing = (stats.queued ?? 0) + (stats.preprocessing ?? 0) + (stats.ocr_running ?? 0) + (stats.validating ?? 0) + (stats.publishing ?? 0);
   const issues = (stats.failed ?? 0) + (stats.needs_review ?? 0) + (stats.publish_failed ?? 0);
+  const visibleDocuments = useMemo(() => {
+    const keyword = query.trim().toLocaleLowerCase("vi");
+    return documents.filter((document) => {
+      const matchesQuery = !keyword || [document.original_name, document.document_title, document.issuer_name]
+        .some((value) => value?.toLocaleLowerCase("vi").includes(keyword));
+      const matchesFilter = filter === "all"
+        || (filter === "review" && ["needs_review", "failed", "publish_failed"].includes(document.status))
+        || (filter === "processing" && isProcessingStatus(document.status))
+        || (filter === "published" && document.status === "published");
+      return matchesQuery && matchesFilter;
+    });
+  }, [documents, filter, query]);
 
   return (
     <div className="app-shell">
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark"><ScanLine size={20} /></span>
-          <div><strong>GreenCookOCR</strong><span>Gemini document pipeline</span></div>
+          <div><strong>GreenCook</strong><span>Xử lý chứng từ đặt hàng</span></div>
         </div>
         <div className="header-actions">
           <button type="button" className="icon-button" title="Làm mới" onClick={() => void loadDocuments()}><RefreshCw size={18} /></button>
           <button type="button" className="primary-button" disabled={uploading} onClick={() => inputRef.current?.click()}>
             {uploading ? <LoaderCircle className="spin" size={18} /> : <Upload size={18} />}
-            Chọn file
+            Thêm tài liệu
           </button>
           <input
             ref={inputRef}
@@ -248,12 +299,12 @@ export function App() {
         </div>
       </header>
 
-      <main>
+      <main className={selected ? "has-selection" : ""}>
         <section className="metrics-band">
-          <Metric label="Tổng tài liệu" value={total} icon={<FileText size={18} />} />
+          <Metric label="Tất cả tài liệu" value={total} icon={<FileText size={18} />} />
           <Metric label="Đang xử lý" value={processing} icon={<Clock3 size={18} />} tone="amber" />
-          <Metric label="Đã vào hệ thống" value={stats.published ?? 0} icon={<CheckCircle2 size={18} />} tone="green" />
-          <Metric label="Cần xử lý" value={issues} icon={<AlertTriangle size={18} />} tone="red" />
+          <Metric label="Đã đưa vào hệ thống" value={stats.published ?? 0} icon={<CheckCircle2 size={18} />} tone="green" />
+          <Metric label="Cần xem lại" value={issues} icon={<AlertTriangle size={18} />} tone="red" />
         </section>
 
         <section
@@ -269,22 +320,33 @@ export function App() {
         >
           <Upload size={20} />
           <div>
-            <strong>{uploading ? `${uploadProgress.current}/${uploadProgress.total} ${uploadProgress.name}` : "Thả tài liệu vào đây"}</strong>
-            <span>PDF, ảnh, Word, Excel</span>
+            <strong>{uploading ? `Đang thêm ${uploadProgress.current}/${uploadProgress.total}: ${uploadProgress.name}` : "Kéo thả tài liệu hoặc bấm Thêm tài liệu"}</strong>
+            <span>PDF, ảnh, Word, Excel. Tài liệu mới sẽ được đọc tuần tự.</span>
           </div>
           {uploading && <div className="upload-track"><span style={{ width: `${uploadProgress.current / uploadProgress.total * 100}%` }} /></div>}
         </section>
 
-        {error && <div className="error-banner"><AlertTriangle size={17} /><span>{error}</span><button type="button" title="Đóng" onClick={() => setError(null)}><X size={17} /></button></div>}
+        {error && <div className="error-banner"><AlertTriangle size={17} /><span>{displayUserMessage(error)}</span><button type="button" title="Đóng" onClick={() => setError(null)}><X size={17} /></button></div>}
 
         <section className="workspace">
           <div className="queue-pane">
-            <div className="section-heading"><div><h1>Hàng đợi OCR</h1><span>{documents.length} tài liệu gần nhất</span></div></div>
+            <div className="section-heading queue-heading">
+              <div><h1>Danh sách chứng từ</h1><span>{visibleDocuments.length}/{documents.length} tài liệu</span></div>
+              <label className="queue-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm theo tên hoặc đơn vị" aria-label="Tìm chứng từ" /></label>
+            </div>
+            <div className="queue-filters" aria-label="Lọc chứng từ">
+              <FilterButton active={filter === "all"} onClick={() => setFilter("all")}>Tất cả</FilterButton>
+              <FilterButton active={filter === "review"} onClick={() => setFilter("review")}>Cần xem lại</FilterButton>
+              <FilterButton active={filter === "processing"} onClick={() => setFilter("processing")}>Đang xử lý</FilterButton>
+              <FilterButton active={filter === "published"} onClick={() => setFilter("published")}>Đã vào hệ thống</FilterButton>
+            </div>
             <div className="table-wrap">
               <table className="queue-table">
-                <thead><tr><th>Tài liệu</th><th>Tiêu đề</th><th>Mẫu</th><th>Trạng thái</th><th className="numeric">Dòng</th><th aria-label="Thao tác" /></tr></thead>
+                <thead><tr><th>Tài liệu</th><th>Nội dung</th><th>Loại chứng từ</th><th>Trạng thái</th><th className="numeric">Sản phẩm</th><th aria-label="Thao tác" /></tr></thead>
                 <tbody>
-                  {documents.map((document) => (
+                  {visibleDocuments.map((document) => {
+                    const retrying = retryingIds.has(document.id);
+                    return (
                     <tr
                       key={document.id}
                       className={selected?.id === document.id ? "selected" : ""}
@@ -297,24 +359,24 @@ export function App() {
                       }}
                     >
                       <td><div className="file-cell">{fileIcon(document.original_name)}<div><strong title={document.original_name}>{document.original_name}</strong><span>{formatBytes(Number(document.size_bytes))}</span></div></div></td>
-                      <td><span className="title-cell">{document.document_title ?? "Chưa nhận diện"}</span></td>
-                      <td><code>{shortTemplate(document.template_key)}</code></td>
-                      <td><StatusBadge status={document.status} /></td>
+                      <td><span className="title-cell">{displayDocumentTitle(document.document_title, document.original_name)}</span></td>
+                      <td><span className="document-type">{documentTypeLabel(document.template_key)}</span></td>
+                      <td><StatusBadge status={document.status} retrying={retrying} /></td>
                       <td className="numeric">{document.item_count ?? 0}</td>
                       <td><div className="row-actions">
-                        {(document.status === "failed" || document.status === "needs_review") && <button type="button" className="icon-button compact" title="Chạy lại" onClick={(event) => { event.stopPropagation(); void retry(document.id); }}><RotateCcw size={16} /></button>}
-                        {!isProcessingStatus(document.status) && <button type="button" className="icon-button compact danger-icon" title="Xóa tài liệu" disabled={deletingId === document.id} onClick={(event) => { event.stopPropagation(); void removeDocument(document.id, document.original_name); }}><Trash2 size={16} /></button>}
+                        {(document.status === "failed" || document.status === "needs_review" || document.status === "completed" || document.status === "published") && <button type="button" className="icon-button compact" title="Đọc lại tài liệu" disabled={retrying} onClick={(event) => { event.stopPropagation(); void retry(document.id); }}>{retrying ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}</button>}
+                        {!isProcessingStatus(document.status) && !retrying && <button type="button" className="icon-button compact danger-icon" title="Xóa tài liệu" disabled={deletingId === document.id} onClick={(event) => { event.stopPropagation(); void removeDocument(document.id, document.original_name); }}><Trash2 size={16} /></button>}
                         <ChevronRight size={17} />
                       </div></td>
                     </tr>
-                  ))}
-                  {!documents.length && <tr><td colSpan={6} className="empty-state">Chưa có tài liệu</td></tr>}
+                  );})}
+                  {!visibleDocuments.length && <tr><td colSpan={6} className="empty-state">Không tìm thấy chứng từ phù hợp</td></tr>}
                 </tbody>
               </table>
             </div>
           </div>
 
-          {selected && <DetailPane document={selected} deleting={deletingId === selected.id} onClose={() => setSelected(null)} onRetry={retry} onConfirm={confirm} onDelete={removeDocument} onRefresh={openDocument} />}
+          {selected && <DetailPane key={selected.id} document={selected} deleting={deletingId === selected.id} retrying={retryingIds.has(selected.id)} onClose={() => setSelected(null)} onRetry={retry} onConfirm={confirm} onDelete={removeDocument} />}
         </section>
       </main>
     </div>
@@ -325,102 +387,89 @@ function Metric({ label, value, icon, tone = "neutral" }: { label: string; value
   return <div className={`metric ${tone}`}><span>{icon}</span><div><strong>{value}</strong><small>{label}</small></div></div>;
 }
 
-function StatusBadge({ status }: { status: Status }) {
-  const active = ["preprocessing", "ocr_running", "validating", "publishing"].includes(status);
-  return <span className={`status status-${status}`}>{active && <LoaderCircle className="spin" size={13} />}{STATUS_LABELS[status]}</span>;
+function StatusBadge({ status, retrying = false }: { status: Status; retrying?: boolean }) {
+  const active = retrying || ["queued", "preprocessing", "ocr_running", "validating", "publishing"].includes(status);
+  return <span className={`status ${retrying ? "status-retrying" : `status-${status}`}`}>{active && <LoaderCircle className="spin" size={13} />}{retrying ? "Đang đọc lại" : STATUS_LABELS[status]}</span>;
 }
 
-function DetailPane({ document, deleting, onClose, onRetry, onConfirm, onDelete, onRefresh }: { document: DocumentDetail; deleting: boolean; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void>; onDelete: (id: string, name: string) => Promise<void>; onRefresh: (id: string) => Promise<void> }) {
-  const [matching, setMatching] = useState(false);
-  const [mappingError, setMappingError] = useState<string | null>(null);
+function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm, onDelete }: { document: DocumentDetail; deleting: boolean; retrying: boolean; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void>; onDelete: (id: string, name: string) => Promise<void> }) {
+  const [warningsExpanded, setWarningsExpanded] = useState(false);
+  const [poChecksExpanded, setPoChecksExpanded] = useState(false);
+  const [sourceExpanded, setSourceExpanded] = useState(true);
   const poNumbers = [...new Set(document.items.map((item) => item.po_number).filter((value): value is string => Boolean(value)))];
   const hasRowOrders = poNumbers.length > 1;
   const poSummary = document.po_number ?? (hasRowOrders ? `${poNumbers.length} PO trong file` : poNumbers[0] ?? "-");
   const warnings = [...new Set(document.warnings
-    .map(localizeOcrWarning)
+    .map(displayUserMessage)
     .filter((warning): warning is string => Boolean(warning)))];
   const canRetry = (["failed", "needs_review", "completed"] as Status[]).includes(document.status);
   const canDelete = !isProcessingStatus(document.status);
-  const canMap = (["needs_review", "publish_failed"] as Status[]).includes(document.status);
-  const unmatchedItems = document.items.filter((item) => !item.matched_kg_sp_id);
-  const readyToPublish = unmatchedItems.length === 0 && document.items.length > 0;
-
-  const autoMatch = async () => {
-    setMatching(true);
-    setMappingError(null);
-    try {
-      const response = await fetch(`/api/documents/${document.id}/auto-match`, { method: "POST" });
-      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error ?? "Không thể đối chiếu tự động");
-      await onRefresh(document.id);
-    } catch (reason) {
-      setMappingError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setMatching(false);
-    }
-  };
-
-  const selectPartner = async (entry: CatalogEntry) => {
-    const response = await fetch(`/api/documents/${document.id}/partner`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bpartnerId: entry.id })
-    });
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error ?? "Không thể chọn đối tác");
-    await onRefresh(document.id);
-  };
-
-  const selectProduct = async (itemId: string, entry: CatalogEntry) => {
-    const response = await fetch(`/api/documents/${document.id}/items/${itemId}/product`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kgSpId: entry.id })
-    });
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error ?? "Không thể chọn sản phẩm");
-    await onRefresh(document.id);
-  };
+  const canConfirm = (["needs_review", "publish_failed"] as Status[]).includes(document.status);
+  const hasPoNumber = Boolean(document.po_number) || poNumbers.length > 0;
+  const duplicatePo = document.po_references.some((check) => check.matched);
+  const readyToPublish = hasPoNumber;
+  const documentFields = buildDocumentFields(document, poSummary, hasRowOrders);
+  const additionalFields = [...documentFields, ...buildAdditionalFields(document, documentFields)];
 
   return <aside className="detail-pane">
-    <div className="detail-header"><div><span>Chi tiết chứng từ</span><h2>{document.document_title ?? document.original_name}</h2></div><button type="button" className="icon-button" title="Đóng" onClick={onClose}><X size={18} /></button></div>
-    <div className="detail-meta">
-      <Meta label="File" value={document.original_name} />
-      <Meta label="Mẫu" value={document.template_key ?? "Chưa xác định"} mono />
-      <Meta label="Số PO" value={poSummary} />
-      <Meta label="Ngày PO" value={formatDate(document.po_date)} />
-      <Meta label="Đơn vị" value={document.issuer_name ?? "-"} />
-      <Meta label="Trạng thái" value={STATUS_LABELS[document.status]} />
-    </div>
+    <div className="detail-header"><div><span>Thông tin chứng từ</span><h2>{displayDocumentTitle(document.document_title, document.original_name)}</h2></div><button type="button" className="icon-button" title="Đóng" onClick={onClose}><X size={18} /></button></div>
     <div className="totals-strip">
       <TotalStat label="Tiền hàng" value={formatMoney(document.subtotal_amount, document.currency)} />
       <TotalStat label="Thuế" value={formatMoney(document.tax_amount, document.currency)} />
       <TotalStat label={hasRowOrders ? "Tổng giá trị dòng" : "Tổng đơn hàng"} value={formatMoney(document.total_amount, document.currency)} emphasis />
     </div>
-    {document.error_message && <div className="detail-error"><AlertTriangle size={16} />{document.error_message}</div>}
-    {warnings.length > 0 && <div className="warning-list">{warnings.map((warning) => <div key={warning}><AlertTriangle size={14} />{warning}</div>)}</div>}
-    {document.status === "published" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã đưa vào iDempiere</strong><span>Mã bản ghi: {document.published_order_ids.join(", ") || "Đã đồng bộ"}</span></div></div>}
-    {canMap && <section className="mapping-band">
-      <div className="mapping-heading"><div><span>Đối chiếu iDempiere</span><strong>{readyToPublish ? "Sẵn sàng xác nhận" : `Còn ${unmatchedItems.length} sản phẩm cần chọn`}</strong></div><button type="button" className="secondary-button compact-button" disabled={matching} onClick={() => void autoMatch()}>{matching ? <LoaderCircle className="spin" size={16} /> : <Link2 size={16} />}Khớp chính xác</button></div>
-      <div className="partner-mapping"><span>Đối tác liên kết (không bắt buộc)</span>{document.target_bpartner_id ? <strong><CheckCircle2 size={15} />{document.target_bpartner_name}</strong> : <CatalogPicker kind="partners" initialQuery={document.issuer_name ?? ""} placeholder="Tìm C_BPartner nếu có" onSelect={selectPartner} />}</div>
-      {mappingError && <div className="inline-error">{mappingError}</div>}
+    {(retrying || isProcessingStatus(document.status) || document.status === "queued") && <div className="processing-banner">
+      <LoaderCircle className="spin" size={18} />
+      <div><strong>{retrying ? "Đang đọc lại tài liệu" : STATUS_LABELS[document.status]}</strong><span>Hệ thống đang xử lý, dữ liệu sẽ tự cập nhật khi có kết quả.</span></div>
+    </div>}
+    {additionalFields.length > 0 && <section className={`source-fields collapsible-panel ${sourceExpanded ? "expanded" : ""}`}>
+      <button type="button" className="collapse-trigger" aria-expanded={sourceExpanded} onClick={() => setSourceExpanded((current) => !current)}>
+        <span><FileText size={15} /><strong>Thông tin chứng từ</strong><small>{additionalFields.length} trường</small></span>
+        {sourceExpanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
+      </button>
+      {sourceExpanded && <div className="source-field-scroll"><div className="source-field-grid">{additionalFields.map((field) => <div key={`${field.label}:${field.value}`}><span>{field.label}</span><strong>{field.value}</strong></div>)}</div></div>}
+    </section>}
+    {document.error_message && <div className="detail-error"><AlertTriangle size={16} />{displayUserMessage(document.error_message)}</div>}
+    {warnings.length > 0 && <section className={`warning-list collapsible-panel ${warningsExpanded ? "expanded" : ""}`}>
+      <button type="button" className="collapse-trigger" aria-expanded={warningsExpanded} onClick={() => setWarningsExpanded((current) => !current)}>
+        <span><AlertTriangle size={15} /><strong>Thông tin cần bổ sung</strong><small>{warnings.length} mục</small></span>
+        {warningsExpanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
+      </button>
+      {warningsExpanded && <div className="collapse-content">{warnings.map((warning) => <div key={warning}><AlertTriangle size={14} /><span>{warning}</span></div>)}</div>}
+    </section>}
+    {document.status === "published" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã tạo đơn nháp trong iDempiere</strong><span>ID đơn iDempiere: {document.published_order_ids.join(", ") || "Đã lưu thành công"}</span></div></div>}
+    {canConfirm && <section className={`mapping-band collapsible-panel ${poChecksExpanded ? "expanded" : ""}`}>
+      <button type="button" className="collapse-trigger" aria-expanded={poChecksExpanded} onClick={() => setPoChecksExpanded((current) => !current)}>
+        <span><CheckCircle2 size={15} /><strong>Kiểm tra số PO</strong><small>{document.po_references.length || (hasPoNumber ? 1 : 0)} số</small></span>
+        {poChecksExpanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
+      </button>
+      {poChecksExpanded && <div className="collapse-content"><div className="mapping-heading"><div><span>Kết quả đối chiếu</span><strong>{hasPoNumber ? "So với dữ liệu hiện có" : "Chưa tìm thấy số PO"}</strong></div></div>
+      {document.po_references.map((check) => <div className="partner-mapping" key={check.poNumber}>
+        <span>Số PO: {check.poNumber}</span>
+        {check.reference
+          ? <strong className="already-exists"><AlertTriangle size={15} />Đã có ở đơn {check.reference.documentNo}</strong>
+          : <strong className="not-found"><AlertTriangle size={15} />Chưa có trong hệ thống</strong>}
+      </div>)}</div>}
     </section>}
     <div className="detail-table-heading"><h3>Dòng sản phẩm</h3><span>{document.items.length} dòng</span></div>
-    <div className="detail-table-wrap"><table className={`product-table ${hasRowOrders ? "with-orders" : ""}`}><thead><tr><th>#</th>{hasRowOrders && <th>PO / Cửa hàng</th>}<th>Mã sản phẩm</th><th>Barcode</th><th>Tên sản phẩm</th><th className="numeric">Số lượng</th><th>Đơn vị</th><th className="numeric">Đơn giá</th><th className="numeric">Thành tiền</th></tr></thead><tbody>
-      {document.items.map((item) => <tr key={item.id}><td>{item.line_no}</td>{hasRowOrders && <td className="po-cell"><strong>{item.po_number ?? "-"}</strong><span>{item.store_name ?? item.store_code ?? "-"}</span></td>}<td><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong>{item.product_code && item.vendor_product_code && <span>NCC: {item.vendor_product_code}</span>}</td><td className="mono">{item.barcode ?? "-"}</td><td><strong>{item.product_name ?? "-"}</strong>{item.model && <span>Model: {item.model}</span>}{canMap && (item.matched_kg_sp_id ? <span className="matched-label"><CheckCircle2 size={13} />{item.matched_product_value} · {item.matched_product_name}</span> : <CatalogPicker kind="products" initialQuery={item.barcode ?? item.product_code ?? item.model ?? item.product_name ?? ""} placeholder="Chọn sản phẩm kg_sp" onSelect={(entry) => selectProduct(item.id, entry)} />)}</td><td className="numeric"><strong>{formatDecimal(item.quantity)}</strong>{item.units_per_order_unit && item.units_per_order_unit !== "1" && <span>× {formatDecimal(item.units_per_order_unit)} / ĐVT</span>}</td><td><strong>{item.unit ?? "-"}</strong></td><td className="numeric money-cell">{formatMoney(item.unit_price, null)}</td><td className="numeric money-cell strong">{formatMoney(item.amount, null)}</td></tr>)}
-      {!document.items.length && <tr><td colSpan={hasRowOrders ? 9 : 8} className="empty-state">Chưa có dữ liệu</td></tr>}
+    <div className="detail-table-wrap"><table className={`product-table ${hasRowOrders ? "with-orders" : ""}`}><thead><tr><th>#</th>{hasRowOrders && <th>PO / Cửa hàng</th>}<th>Mã sản phẩm</th><th>Barcode</th><th>Tên sản phẩm</th><th className="numeric">Số lượng</th><th>Đơn vị</th><th className="numeric">Thuế suất</th><th className="numeric">Đơn giá</th><th className="numeric">Thành tiền</th></tr></thead><tbody>
+      {document.items.map((item) => <tr key={item.id}><td>{item.line_no}</td>{hasRowOrders && <td className="po-cell"><strong>{item.po_number ?? "-"}</strong><span>{item.store_name ?? item.store_code ?? "-"}</span></td>}<td><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong>{item.product_code && item.vendor_product_code && <span>NCC: {item.vendor_product_code}</span>}</td><td className="mono">{item.barcode ?? "-"}</td><td><strong>{item.product_name ?? "-"}</strong>{item.model && <span>Model: {item.model}</span>}<ItemExtraFields item={item} /></td><td className="numeric"><strong>{formatDecimal(item.quantity)}</strong>{item.units_per_order_unit && item.units_per_order_unit !== "1" && <span>× {formatDecimal(item.units_per_order_unit)} / ĐVT</span>}</td><td><strong>{item.unit ?? "-"}</strong></td><td className="numeric vat-cell">{formatVatRate(item.vat_rate)}</td><td className="numeric money-cell">{formatMoney(item.unit_price, null)}</td><td className="numeric money-cell strong">{formatMoney(item.amount, null)}</td></tr>)}
+      {!document.items.length && <tr><td colSpan={hasRowOrders ? 10 : 9} className="empty-state">Chưa có dữ liệu</td></tr>}
     </tbody></table></div>
     <div className="mobile-product-list">
       {document.items.map((item) => <article className="mobile-product" key={item.id}>
         <div className="mobile-product-title"><span>#{item.line_no}</span><strong>{item.product_name ?? item.model ?? "Chưa có tên sản phẩm"}</strong></div>
         {hasRowOrders && <div className="mobile-product-order"><span>PO {item.po_number ?? "-"}</span><strong>{item.store_name ?? item.store_code ?? "-"}</strong></div>}
         <div className="mobile-product-keys"><div><span>Mã sản phẩm</span><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong></div><div><span>Barcode</span><strong>{item.barcode ?? "-"}</strong></div></div>
-        <div className="mobile-product-values"><div><span>Số lượng</span><strong>{formatDecimal(item.quantity)}{item.units_per_order_unit && item.units_per_order_unit !== "1" ? ` × ${formatDecimal(item.units_per_order_unit)}` : ""}</strong></div><div><span>Đơn vị</span><strong>{item.unit ?? "-"}</strong></div><div><span>Đơn giá</span><strong>{formatMoney(item.unit_price, null)}</strong></div><div><span>Thành tiền</span><strong>{formatMoney(item.amount, null)}</strong></div></div>
-        {canMap && (item.matched_kg_sp_id ? <span className="matched-label"><CheckCircle2 size={13} />{item.matched_product_value} · {item.matched_product_name}</span> : <CatalogPicker kind="products" initialQuery={item.barcode ?? item.product_code ?? item.model ?? item.product_name ?? ""} placeholder="Chọn sản phẩm kg_sp" onSelect={(entry) => selectProduct(item.id, entry)} />)}
+        <ItemExtraFields item={item} />
+        <div className="mobile-product-values"><div><span>Số lượng</span><strong>{formatDecimal(item.quantity)}{item.units_per_order_unit && item.units_per_order_unit !== "1" ? ` × ${formatDecimal(item.units_per_order_unit)}` : ""}</strong></div><div><span>Đơn vị</span><strong>{item.unit ?? "-"}</strong></div><div><span>Thuế suất</span><strong>{formatVatRate(item.vat_rate)}</strong></div><div><span>Đơn giá</span><strong>{formatMoney(item.unit_price, null)}</strong></div><div><span>Thành tiền</span><strong>{formatMoney(item.amount, null)}</strong></div></div>
       </article>)}
       {!document.items.length && <div className="empty-state">Chưa có dữ liệu</div>}
     </div>
     {(canRetry || canDelete) && <div className="detail-footer">
-      {canMap && <button type="button" className="primary-button" disabled={!readyToPublish} title={readyToPublish ? "Đưa đơn hàng vào iDempiere" : "Cần đối chiếu đủ sản phẩm"} onClick={() => void onConfirm(document.id)}><CheckCircle2 size={17} />Xác nhận và đưa vào hệ thống</button>}
-      {canRetry && <button type="button" className="secondary-button" onClick={() => void onRetry(document.id)}><RotateCcw size={17} />{document.status === "completed" ? "OCR lại" : "Chạy lại OCR"}</button>}
-      {canDelete && <button type="button" className="danger-button" disabled={deleting} onClick={() => void onDelete(document.id, document.original_name)}>{deleting ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}Xóa</button>}
+      {canConfirm && <button type="button" className="primary-button" disabled={!readyToPublish} title={publishBlocker(hasPoNumber, duplicatePo)} onClick={() => void onConfirm(document.id)}><CheckCircle2 size={17} />Xác nhận và tạo đơn</button>}
+      {canRetry && <button type="button" className="secondary-button" disabled={retrying} onClick={() => void onRetry(document.id)}>{retrying ? <LoaderCircle className="spin" size={17} /> : <RotateCcw size={17} />}{retrying ? "Đang đọc lại" : "Đọc lại"}</button>}
+      {canDelete && !retrying && <button type="button" className="danger-button" disabled={deleting} onClick={() => void onDelete(document.id, document.original_name)}>{deleting ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}Xóa chứng từ</button>}
     </div>}
   </aside>;
 }
@@ -429,8 +478,117 @@ function TotalStat({ label, value, emphasis = false }: { label: string; value: s
   return <div className={emphasis ? "emphasis" : ""}><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function Meta({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return <div><span>{label}</span><strong className={mono ? "mono" : ""}>{value}</strong></div>;
+function ItemExtraFields({ item }: { item: DocumentDetail["items"][number] }) {
+  const fields = buildItemAdditionalFields(item);
+  if (!fields.length) return null;
+  return <details className="item-extra-fields"><summary>{fields.length} thông tin khác</summary><div>{fields.map((field) => <span key={`${field.label}:${field.value}`}><small>{field.label}</small><strong>{field.value}</strong></span>)}</div></details>;
+}
+
+function buildDocumentFields(document: DocumentDetail, poSummary: string, hasRowOrders: boolean): Array<{ label: string; value: string }> {
+  const fields: Array<[string, unknown]> = [
+    ["Tệp gốc", document.original_name],
+    ["Loại chứng từ", documentTypeLabel(document.template_key)],
+    [hasRowOrders ? "Số PO trong file" : "Số PO", poSummary],
+    ["Ngày PO", formatDate(document.po_date)],
+    ["Đơn vị đặt hàng", document.issuer_name],
+    ["Trạng thái", STATUS_LABELS[document.status]],
+    ["Tiền hàng", formatMoney(document.subtotal_amount, document.currency)],
+    ["Thuế", formatMoney(document.tax_amount, document.currency)],
+    [hasRowOrders ? "Tổng giá trị dòng" : "Tổng đơn hàng", formatMoney(document.total_amount, document.currency)]
+  ];
+  return fields.flatMap(([label, value]) => {
+    const displayed = displayFieldValue(value);
+    return displayed && displayed !== "-" ? [{ label, value: displayed }] : [];
+  });
+}
+
+function buildAdditionalFields(document: DocumentDetail, existingFields: Array<{ label: string; value: string }> = []): Array<{ label: string; value: string }> {
+  const normalized = document.normalized_result ?? {};
+  const candidates: Array<[string, unknown]> = [
+    ["Số chứng từ", normalized.document_number],
+    ["Số tham chiếu", normalized.reference_number],
+    ["Chi nhánh đặt hàng", normalized.issuer_branch],
+    ["Ngày giao", normalized.delivery_date ?? document.delivery_date],
+    ["Khung giờ giao", normalized.delivery_window],
+    ["Bên mua", normalized.buyer_name],
+    ["Mã bên mua", normalized.buyer_code],
+    ["Mã số thuế bên mua", normalized.buyer_tax_id],
+    ["Tên nhà cung cấp", normalized.supplier_name],
+    ["Mã nhà cung cấp", normalized.supplier_code],
+    ["Mã số thuế nhà cung cấp", normalized.supplier_tax_id],
+    ["Người liên hệ", normalized.order_contact],
+    ["Điện thoại", normalized.contact_phone],
+    ["Email", normalized.contact_email],
+    ["Địa chỉ giao hàng", normalized.delivery_address],
+    ["Địa chỉ nhận hàng", normalized.ship_to_address],
+    ["Địa chỉ thanh toán", normalized.bill_to_address],
+    ["Kho nhận hàng", normalized.warehouse_name],
+    ["Mã kho", normalized.warehouse_code],
+    ["Bộ phận", normalized.department],
+    ["Điều khoản thanh toán", normalized.payment_terms],
+    ["Phương thức thanh toán", normalized.payment_method],
+    ["Phương thức giao hàng", normalized.delivery_method],
+    ["Bảng giá", normalized.price_list_name],
+    ["Chiết khấu", normalized.discount_amount],
+    ["Phụ phí", normalized.charge_amount],
+    ["Phí vận chuyển", normalized.freight_amount]
+  ];
+  const rawFields = Array.isArray(normalized.raw_fields)
+    ? normalized.raw_fields as Array<Record<string, unknown>>
+    : [];
+  for (const field of rawFields) candidates.push([String(field.label ?? "Thông tin khác"), field.value]);
+
+  const seen = new Set(existingFields.map((field) => `${field.label.toLocaleLowerCase("vi")}:${field.value}`));
+  return candidates.flatMap(([label, value]) => {
+    const displayed = displayFieldValue(value);
+    const key = `${label.toLocaleLowerCase("vi")}:${displayed}`;
+    if (!displayed || seen.has(key)) return [];
+    seen.add(key);
+    return [{ label, value: displayed }];
+  });
+}
+
+function buildItemAdditionalFields(item: DocumentDetail["items"][number]): Array<{ label: string; value: string }> {
+  const candidates: Array<[string, unknown]> = [
+    ["Mã Article", item.article_code],
+    ["SKU", item.sku],
+    ["Loại đơn vị đặt", item.ou_type],
+    ["Số lượng miễn phí", item.free_quantity],
+    ["Giá niêm yết", item.list_price],
+    ["Chiết khấu (%)", item.discount_percent],
+    ["Tiền chiết khấu", item.discount_amount],
+    ["Tiền thuế", item.tax_amount],
+    ["Tổng sau thuế", item.gross_amount],
+    ["Ngày hẹn", item.promised_date],
+    ["Mã kho", item.warehouse_code],
+    ["Kho", item.warehouse_name],
+    ["Trang nguồn", item.source_page]
+  ];
+  for (const field of item.extra_fields ?? []) {
+    candidates.push([field.label ?? "Thông tin khác", field.value]);
+  }
+  const seen = new Set<string>();
+  return candidates.flatMap(([label, value]) => {
+    const displayed = displayFieldValue(value);
+    const key = `${label.toLocaleLowerCase("vi")}:${displayed}`;
+    if (!displayed || seen.has(key)) return [];
+    seen.add(key);
+    return [{ label, value: displayed }];
+  });
+}
+
+function displayFieldValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "boolean") return value ? "Có" : "Không";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDate(value);
+  if (["string", "number"].includes(typeof value)) return String(value);
+  return "";
+}
+
+function publishBlocker(hasPo: boolean, duplicatePo: boolean): string {
+  if (!hasPo) return "Chưa có số PO để đối chiếu";
+  if (duplicatePo) return "PO đã có sẽ được ghi nhận, PO chưa có sẽ được tạo mới";
+  return "Xác nhận và tạo đơn đặt hàng trong iDempiere";
 }
 
 function fileIcon(name: string) {
@@ -440,9 +598,30 @@ function fileIcon(name: string) {
   return <FileText size={19} />;
 }
 
-function shortTemplate(value: string | null) {
-  if (!value) return "-";
-  return value.replace(/^po_/, "").replace(/_purchase_order$/, "").replace(/_/g, " ");
+function documentTypeLabel(value: string | null) {
+  if (!value) return "Chưa xác định";
+  const normalized = value.toLowerCase();
+  if (normalized.includes("delivery_request")) return "Đề nghị giao hàng";
+  if (normalized.includes("purchase_note")) return "Phiếu đặt hàng";
+  if (
+    normalized.includes("purchase_order")
+    || normalized.includes("order_export")
+    || normalized.includes("customer_manual")
+    || normalized.includes("manual_purchase")
+    || normalized.includes("dmx")
+    || normalized.startsWith("po_")
+  ) return "Đơn đặt hàng";
+  if (normalized.includes("store_order")) return "Đơn hàng cửa hàng";
+  return "Chứng từ bán hàng";
+}
+
+function displayDocumentTitle(value: string | null, fallback: string) {
+  if (!value) return fallback;
+  const normalized = value.normalize("NFC").replace(/\s+/g, " ").trim();
+  if (/đề nghị giao hàng|request delivery/i.test(normalized)) return "Đề nghị giao hàng";
+  if (/purchase note/i.test(normalized)) return "Phiếu đặt hàng";
+  if (/purchase order/i.test(normalized)) return "Đơn đặt hàng";
+  return normalized.replace(/\bREQUEST DELIVERY\b/gi, "").replace(/\s+/g, " ").trim();
 }
 
 function formatBytes(bytes: number) {
@@ -461,42 +640,34 @@ function formatDecimal(value: string | null) {
   return value.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
 }
 
-function CatalogPicker({ kind, initialQuery, placeholder, onSelect }: { kind: "products" | "partners"; initialQuery: string; placeholder: string; onSelect: (entry: CatalogEntry) => Promise<void> }) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState(initialQuery);
-  const [results, setResults] = useState<CatalogEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+function formatVatRate(value: string | null) {
+  return value === null ? "-" : `${formatDecimal(value)}%`;
+}
 
-  useEffect(() => {
-    if (!open || !query.trim()) return setResults([]);
-    const controller = new AbortController();
-    const timer = setTimeout(async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const response = await fetch(`/api/catalog/${kind}?query=${encodeURIComponent(query.trim())}`, { signal: controller.signal });
-        if (!response.ok) throw new Error("Không tải được danh mục iDempiere");
-        const payload = await response.json();
-        setResults(payload[kind] ?? []);
-      } catch (reason) {
-        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason));
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
-      }
-    }, 250);
-    return () => { clearTimeout(timer); controller.abort(); };
-  }, [kind, open, query]);
+function FilterButton({ active, children, onClick }: { active: boolean; children: React.ReactNode; onClick: () => void }) {
+  return <button type="button" className={active ? "active" : ""} aria-pressed={active} onClick={onClick}>{children}</button>;
+}
 
-  return <div className="catalog-picker">
-    <div className="catalog-input"><Search size={14} /><input value={query} placeholder={placeholder} onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true); }} />{loading && <LoaderCircle className="spin" size={14} />}</div>
-    {open && <div className="catalog-results">
-      {results.map((entry) => <button type="button" key={entry.id} onClick={() => { setOpen(false); void onSelect(entry).catch((reason) => setError(reason.message)); }}><strong>{entry.value}</strong><span>{entry.name}</span>{entry.barcode && <code>{entry.barcode}</code>}</button>)}
-      {!loading && !results.length && <span className="catalog-empty">Không có kết quả chính xác</span>}
-      {error && <span className="catalog-empty error-text">{error}</span>}
-      <button type="button" className="catalog-close" onClick={() => setOpen(false)}>Đóng</button>
-    </div>}
-  </div>;
+function displayUserMessage(value: string) {
+  const localized = localizeOcrWarning(value) ?? value;
+  const cleaned = localized
+    .replace(/\s*\((?:unit_price|vat_rate|amount|subtotal_amount|tax_amount|total_amount|po_date)\)/gi, "")
+    .replace(/\bunit_price\b/gi, "đơn giá")
+    .replace(/\bvat_rate\b/gi, "thuế suất")
+    .replace(/\bsubtotal_amount\b/gi, "tiền hàng")
+    .replace(/\btax_amount\b/gi, "tiền thuế")
+    .replace(/\btotal_amount\b/gi, "tổng tiền")
+    .replace(/\bpo_date\b/gi, "ngày PO")
+    .replace(/\bamount\b/gi, "thành tiền")
+    .replace(/Gemini(?: API)?/gi, "dịch vụ xử lý tài liệu")
+    .replace(/model OCR|OCR model|Model OCR/gi, "hệ thống đọc tài liệu")
+    .replace(/OCR/gi, "đọc dữ liệu")
+    .replace(/JSON/gi, "dữ liệu");
+  const vietnameseCharacters = (cleaned.match(/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/gi) ?? []).length;
+  const asciiWords = cleaned.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+  return asciiWords >= 5 && vietnameseCharacters === 0
+    ? "Có thông tin trên chứng từ cần được kiểm tra lại."
+    : cleaned;
 }
 
 function isProcessingStatus(status: Status) {

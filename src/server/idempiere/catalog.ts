@@ -16,6 +16,10 @@ export interface TargetPartner {
   id: string;
   value: string;
   name: string;
+  locationId: string | null;
+  locationName: string | null;
+  paymentTermId: string | null;
+  priceListId: string | null;
 }
 
 export async function searchTargetProducts(query: string, limit = 20): Promise<TargetProduct[]> {
@@ -59,6 +63,22 @@ export async function getTargetProduct(id: string, client?: PoolClient): Promise
       AND product.ad_client_id = $2
   `, [id, config.targetAdClientId]);
   return result.rows[0] ? productRow(result.rows[0]) : null;
+}
+
+export async function getTargetProducts(ids: string[], client?: PoolClient): Promise<TargetProduct[]> {
+  const uniqueIds = [...new Set(ids)];
+  if (!uniqueIds.length) return [];
+  const executor = client ?? pool;
+  const result = await executor.query(`
+    SELECT product.kg_sp_id::text AS id, product.value,
+           product.barcode, product.mau AS product_code, product.name,
+           product.c_uom_id::text AS uom_id, uom.name AS uom_name
+    FROM adempiere.kg_sp product
+    LEFT JOIN adempiere.c_uom uom ON uom.c_uom_id = product.c_uom_id
+    WHERE product.kg_sp_id = ANY($1::numeric[]) AND product.isactive = 'Y'
+      AND product.ad_client_id = $2
+  `, [uniqueIds, config.targetAdClientId]);
+  return result.rows.map(productRow);
 }
 
 export async function resolveTargetProduct(
@@ -128,45 +148,90 @@ export async function searchTargetPartners(query: string, limit = 20): Promise<T
   const normalized = query.trim();
   if (!normalized) return [];
   const result = await pool.query(`
-    SELECT c_bpartner_id::text AS id, value, name
-    FROM adempiere.c_bpartner
-    WHERE isactive = 'Y' AND ad_client_id = $3
-      AND (value ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%')
-    ORDER BY CASE WHEN lower(name) = lower($1) THEN 0 ELSE 1 END, name
+    SELECT partner.c_bpartner_id::text AS id, partner.value, partner.name,
+           location.c_bpartner_location_id::text AS location_id,
+           location.name AS location_name,
+           coalesce(partner.po_paymentterm_id, partner.c_paymentterm_id)::text AS payment_term_id,
+           coalesce(partner.po_pricelist_id, partner.m_pricelist_id)::text AS price_list_id
+    FROM adempiere.c_bpartner partner
+    LEFT JOIN LATERAL (
+      SELECT candidate.c_bpartner_location_id, candidate.name
+      FROM adempiere.c_bpartner_location candidate
+      WHERE candidate.c_bpartner_id = partner.c_bpartner_id
+        AND candidate.isactive = 'Y'
+      ORDER BY candidate.isshipto DESC, candidate.isbillto DESC,
+               candidate.c_bpartner_location_id
+      LIMIT 1
+    ) location ON true
+    WHERE partner.isactive = 'Y' AND partner.ad_client_id = $3
+      AND (partner.value ILIKE '%' || $1 || '%' OR partner.name ILIKE '%' || $1 || '%')
+    ORDER BY CASE WHEN lower(partner.name) = lower($1) THEN 0 ELSE 1 END,
+             CASE WHEN location.c_bpartner_location_id IS NULL THEN 1 ELSE 0 END,
+             partner.name
     LIMIT $2
   `, [normalized, limit, config.targetAdClientId]);
-  return result.rows;
+  return result.rows.map(partnerRow);
 }
 
 export async function getTargetPartner(id: string, client?: PoolClient): Promise<TargetPartner | null> {
   const executor = client ?? pool;
   const result = await executor.query(`
-    SELECT c_bpartner_id::text AS id, value, name
-    FROM adempiere.c_bpartner WHERE c_bpartner_id = $1 AND isactive = 'Y'
-      AND ad_client_id = $2
+    SELECT partner.c_bpartner_id::text AS id, partner.value, partner.name,
+           location.c_bpartner_location_id::text AS location_id,
+           location.name AS location_name,
+           coalesce(partner.po_paymentterm_id, partner.c_paymentterm_id)::text AS payment_term_id,
+           coalesce(partner.po_pricelist_id, partner.m_pricelist_id)::text AS price_list_id
+    FROM adempiere.c_bpartner partner
+    LEFT JOIN LATERAL (
+      SELECT candidate.c_bpartner_location_id, candidate.name
+      FROM adempiere.c_bpartner_location candidate
+      WHERE candidate.c_bpartner_id = partner.c_bpartner_id
+        AND candidate.isactive = 'Y'
+      ORDER BY candidate.isshipto DESC, candidate.isbillto DESC,
+               candidate.c_bpartner_location_id
+      LIMIT 1
+    ) location ON true
+    WHERE partner.c_bpartner_id = $1 AND partner.isactive = 'Y'
+      AND partner.ad_client_id = $2
   `, [id, config.targetAdClientId]);
-  return result.rows[0] ?? null;
+  return result.rows[0] ? partnerRow(result.rows[0]) : null;
 }
 
 export async function resolveTargetPartner(name: string, client?: PoolClient): Promise<TargetPartner | null> {
   const executor = client ?? pool;
   const result = await executor.query(`
-    SELECT c_bpartner_id::text AS id, value, name
-    FROM adempiere.c_bpartner
-    WHERE isactive = 'Y' AND ad_client_id = $2
-      AND (lower(btrim(name)) = lower(btrim($1)) OR lower(btrim(value)) = lower(btrim($1)))
-    ORDER BY c_bpartner_id
+    SELECT partner.c_bpartner_id::text AS id, partner.value, partner.name,
+           location.c_bpartner_location_id::text AS location_id,
+           location.name AS location_name,
+           coalesce(partner.po_paymentterm_id, partner.c_paymentterm_id)::text AS payment_term_id,
+           coalesce(partner.po_pricelist_id, partner.m_pricelist_id)::text AS price_list_id
+    FROM adempiere.c_bpartner partner
+    LEFT JOIN LATERAL (
+      SELECT candidate.c_bpartner_location_id, candidate.name
+      FROM adempiere.c_bpartner_location candidate
+      WHERE candidate.c_bpartner_id = partner.c_bpartner_id
+        AND candidate.isactive = 'Y'
+      ORDER BY candidate.isshipto DESC, candidate.isbillto DESC,
+               candidate.c_bpartner_location_id
+      LIMIT 1
+    ) location ON true
+    WHERE partner.isactive = 'Y' AND partner.ad_client_id = $2
+      AND (lower(btrim(partner.name)) = lower(btrim($1)) OR lower(btrim(partner.value)) = lower(btrim($1)))
+    ORDER BY partner.c_bpartner_id
     LIMIT 2
   `, [name, config.targetAdClientId]);
-  return result.rows.length === 1 ? result.rows[0] : null;
+  return result.rows.length === 1 ? partnerRow(result.rows[0]) : null;
 }
 
 export async function resolveCurrencyId(code: string | null, client: PoolClient): Promise<string> {
+  const requestedCode = (code ?? "VND").toUpperCase();
   const result = await client.query<{ id: string }>(`
     SELECT c_currency_id::text AS id FROM adempiere.c_currency
-    WHERE isactive = 'Y' AND iso_code = $1 LIMIT 1
-  `, [(code ?? "VND").toUpperCase()]);
-  if (!result.rows[0]) throw new Error(`Không tìm thấy tiền tệ ${code ?? "VND"} trong iDempiere`);
+    WHERE isactive = 'Y' AND iso_code IN ($1, 'VND')
+    ORDER BY CASE WHEN iso_code = $1 THEN 0 ELSE 1 END
+    LIMIT 1
+  `, [requestedCode]);
+  if (!result.rows[0]) throw new Error("Chưa cấu hình tiền tệ VND trong iDempiere");
   return result.rows[0].id;
 }
 
@@ -182,11 +247,24 @@ function productRow(row: Record<string, unknown>): TargetProduct {
   };
 }
 
+function partnerRow(row: Record<string, unknown>): TargetPartner {
+  return {
+    id: String(row.id),
+    value: String(row.value),
+    name: String(row.name),
+    locationId: row.location_id ? String(row.location_id) : null,
+    locationName: row.location_name ? String(row.location_name) : null,
+    paymentTermId: row.payment_term_id ? String(row.payment_term_id) : null,
+    priceListId: row.price_list_id ? String(row.price_list_id) : null
+  };
+}
+
 function uniqueStrings(values: unknown[]): string[] {
-  return [...new Set(values
-    .filter((value): value is string => typeof value === "string")
-    .map((value) => value.trim())
-    .filter(Boolean))];
+  return [...new Set(values.flatMap((value) => {
+    if (typeof value !== "string") return [];
+    const normalized = value.trim();
+    return normalized ? [normalized] : [];
+  }))];
 }
 
 function modelAliases(value: string): string[] {

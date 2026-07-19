@@ -36,7 +36,7 @@ await registerApiRoutes(app);
 const webRoot = path.resolve("dist");
 try {
   await fs.access(path.join(webRoot, "index.html"));
-  await app.register(fastifyStatic, { root: webRoot, wildcard: false });
+  await app.register(fastifyStatic, { root: webRoot });
   app.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith("/api/")) return reply.code(404).send({ error: "Not found" });
     return reply.sendFile("index.html");

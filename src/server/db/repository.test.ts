@@ -46,12 +46,18 @@ const normalized: OcrDocument = {
     barcode: "8930000000001",
     product_name: "Sản phẩm mẫu",
     model: "GCP01",
+    article_code: "ARTICLE-001",
+    sku: "SKU-001",
+    ou_type: "Pack",
     quantity: "2",
+    free_quantity: "1",
     units_per_order_unit: "1",
     unit: "Cái",
     unit_price: "50000",
     vat_rate: "8",
     amount: "108000",
+    gross_amount: "108000",
+    extra_fields: [{ label: "Ghi chú dòng", value: "Giữ nguyên", section: "line", page: 1 }],
     source_page: 1,
     confidence: 0.99
   }],
@@ -100,6 +106,12 @@ describe("SQLite staging repository", () => {
     expect(status).toBe("needs_review");
     expect(stored?.status).toBe("needs_review");
     expect(stored?.items).toHaveLength(1);
+    expect(stored?.items[0]).toMatchObject({
+      article_code: "ARTICLE-001",
+      sku: "SKU-001",
+      free_quantity: "1",
+      extra_fields: [{ label: "Ghi chú dòng", value: "Giữ nguyên" }]
+    });
   });
 
   it("creates a durable publish outbox job instead of marking the document published", async () => {
@@ -123,6 +135,13 @@ describe("SQLite staging repository", () => {
       "gemini-3.5-flash",
       "prompt-1"
     );
+    await repo.setTargetPartner(document.id, "113", "BICOM");
+    const review = await repo.getDocument(document.id);
+    await repo.setItemProductMatch(document.id, String(review?.items[0].id), {
+      id: "1000000",
+      value: "GCP231",
+      name: "Sản phẩm mẫu"
+    });
 
     const queued = await repo.queuePublish(document.id);
     const stored = await repo.getDocument(document.id);
@@ -132,5 +151,69 @@ describe("SQLite staging repository", () => {
     expect(stored?.status).toBe("publishing");
     expect(job).toMatchObject({ document_id: document.id, status: "running" });
     expect(job?.id).toEqual(expect.any(String));
+  });
+
+  it("queues a document even when partner and kg_sp mappings will be completed later", async () => {
+    const repo = repository();
+    const batchId = await repo.createBatch(1);
+    const document = await repo.insertDocument({
+      batchId,
+      batchPosition: 1,
+      originalName: "incomplete.pdf",
+      storedName: "incomplete.pdf",
+      storagePath: "C:/uploads/incomplete.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 100,
+      sha256: "c".repeat(64)
+    });
+    await repo.completeDocument(
+      document.id,
+      normalized,
+      normalized,
+      createSourceOnlyReconciliation(normalized),
+      "gemini-3.5-flash",
+      "prompt-1"
+    );
+
+    expect(await repo.queuePublish(document.id)).toBe(true);
+    expect((await repo.getDocument(document.id))?.status).toBe("publishing");
+    const job = await repo.claimNextPublishJob();
+    expect(job).toMatchObject({ document_id: document.id });
+    await repo.markPublished(String(job?.id), document.id, ["1000001"]);
+    const published = await repo.getDocument(document.id);
+    expect(await repo.setItemProductMatch(document.id, String(published?.items[0].id), {
+      id: "1000000",
+      value: "GCP231",
+      name: "Sản phẩm bổ sung"
+    })).toBe(true);
+    expect((await repo.getDocument(document.id))?.items[0].matched_kg_sp_id).toBe("1000000");
+  });
+
+  it("queues a header-only document when its PO was extracted", async () => {
+    const repo = repository();
+    const batchId = await repo.createBatch(1);
+    const document = await repo.insertDocument({
+      batchId,
+      batchPosition: 1,
+      originalName: "header-only.pdf",
+      storedName: "header-only.pdf",
+      storagePath: "C:/uploads/header-only.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 100,
+      sha256: "d".repeat(64)
+    });
+    const headerOnly = { ...normalized, items: [] };
+    await repo.completeDocument(
+      document.id,
+      headerOnly,
+      headerOnly,
+      createSourceOnlyReconciliation(headerOnly),
+      "gemini-3.5-flash",
+      "prompt-1"
+    );
+
+    expect(await repo.queuePublish(document.id)).toBe(true);
+    expect((await repo.getDocument(document.id))?.status).toBe("publishing");
+    expect(await repo.claimNextPublishJob()).toMatchObject({ document_id: document.id });
   });
 });

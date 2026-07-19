@@ -10,7 +10,7 @@ export function toPublicOcrErrorMessage(error: unknown): string {
     return "\u004b\u0068\u00f4\u006e\u0067 \u0111\u1ecdc \u0111\u01b0\u1ee3\u0063 \u0066\u0069\u006c\u0065 \u0050\u0044\u0046. \u0056\u0075\u0069 \u006c\u00f2\u006e\u0067 \u006b\u0069\u1ec3\u006d \u0074\u0072\u0061 \u0066\u0069\u006c\u0065 \u0068\u006f\u1eb7\u0063 \u0063\u0068\u1ea1\u0079 \u006c\u1ea1\u0069 \u004f\u0043\u0052.";
   }
   if (/OCR response did not contain a JSON object|Unexpected token|is not valid JSON/i.test(message)) {
-    return "Model OCR trả về sai định dạng dữ liệu. Vui lòng chạy lại OCR hoặc đổi model.";
+    return "Dịch vụ đọc chứng từ trả về sai định dạng dữ liệu. Vui lòng đọc lại tài liệu hoặc đổi model.";
   }
   return stripInternalPaths(message)
     || "\u004f\u0043\u0052 \u0074\u0068\u1ea5\u0074 \u0062\u1ea1\u0069. \u0056\u0075\u0069 \u006c\u00f2\u006e\u0067 \u0063\u0068\u1ea1\u0079 \u006c\u1ea1\u0069 \u0068\u006f\u1eb7\u0063 \u006b\u0069\u1ec3\u006d \u0074\u0072\u0061 \u0074\u00e0\u0069 \u006c\u0069\u1ec7\u0075.";

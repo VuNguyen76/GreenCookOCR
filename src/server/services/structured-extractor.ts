@@ -25,6 +25,7 @@ export function extractStructuredSpreadsheet(text: string, originalName: string)
   if (headerIndex < 0) return null;
 
   const headers = new Map(rows[headerIndex].map((header, index) => [header.trim().toUpperCase(), index]));
+  const tableHeaders = rows[headerIndex].map((header) => header.normalize("NFC").trim());
   const value = (row: string[], header: string): string | null => {
     const index = headers.get(header);
     if (index === undefined) return null;
@@ -33,23 +34,60 @@ export function extractStructuredSpreadsheet(text: string, originalName: string)
   };
 
   const items: OcrItem[] = [];
+  let orderContext: {
+    poNumber: string | null;
+    poDate: string | null;
+    storeCode: string | null;
+    storeName: string | null;
+    deliveryAddress: string | null;
+  } = {
+    poNumber: null,
+    poDate: null,
+    storeCode: null,
+    storeName: null,
+    deliveryAddress: null
+  };
   for (const row of rows.slice(headerIndex + 1)) {
-    const poNumber = value(row, "ORDER ID");
+    const rowPoNumber = value(row, "ORDER ID");
+    const rowPoDate = excelDate(value(row, "ORDER DATE"));
+    const rowStoreCode = value(row, "STORE ID");
+    const rowStoreName = value(row, "STORE NAME");
+    const rowDeliveryAddress = value(row, "STORE ADDRESS");
+    if (rowPoNumber || rowPoDate || rowStoreCode || rowStoreName || rowDeliveryAddress) {
+      orderContext = {
+        poNumber: rowPoNumber ?? orderContext.poNumber,
+        poDate: rowPoDate ?? orderContext.poDate,
+        storeCode: rowStoreCode ?? orderContext.storeCode,
+        storeName: rowStoreName ?? orderContext.storeName,
+        deliveryAddress: rowDeliveryAddress ?? orderContext.deliveryAddress
+      };
+    }
+
+    const productCode = value(row, "PRODUCT ID");
+    const vendorProductCode = value(row, "PROVIDER PRODUCT CODE");
     const productName = value(row, "PRODUCT NAME");
-    if (!poNumber || !productName) continue;
+    if (!productCode && !vendorProductCode && !productName) continue;
 
     items.push({
       line_no: items.length + 1,
-      po_number: poNumber,
-      po_date: excelDate(value(row, "ORDER DATE")),
-      store_code: value(row, "STORE ID"),
-      store_name: value(row, "STORE NAME"),
-      delivery_address: value(row, "STORE ADDRESS"),
-      product_code: value(row, "PRODUCT ID"),
-      vendor_product_code: value(row, "PROVIDER PRODUCT CODE"),
+      po_number: rowPoNumber ?? orderContext.poNumber,
+      po_date: rowPoDate ?? orderContext.poDate,
+      store_code: rowStoreCode ?? orderContext.storeCode,
+      store_name: rowStoreName ?? orderContext.storeName,
+      delivery_address: rowDeliveryAddress ?? orderContext.deliveryAddress,
+      product_code: productCode,
+      vendor_product_code: vendorProductCode,
       barcode: null,
       product_name: productName,
       model: null,
+      extra_fields: tableHeaders.flatMap((header, index) => {
+        const normalizedHeader = header.toUpperCase();
+        if (!header || DMX_REQUIRED_HEADERS.includes(normalizedHeader as typeof DMX_REQUIRED_HEADERS[number])) {
+          return [];
+        }
+        const cell = row[index]?.normalize("NFC").trim();
+        return cell ? [{ label: header, value: cell, section: "Dòng sản phẩm", page: null }] : [];
+      }),
       quantity: numericText(value(row, "QUANTITY")),
       units_per_order_unit: null,
       unit: null,
@@ -64,6 +102,9 @@ export function extractStructuredSpreadsheet(text: string, originalName: string)
 
   const dates = new Set(items.map((item) => item.po_date).filter((date): date is string => Boolean(date)));
   const orderIds = new Set(items.map((item) => item.po_number).filter(Boolean));
+  const warnings = items.some((item) => !item.po_number)
+    ? ["Có dòng sản phẩm chưa đọc được Số PO; dữ liệu dòng vẫn được giữ lại."]
+    : [];
   return OcrDocumentSchema.parse({
     schema_version: "1.0",
     document_title: "DMX Excel Order Export",
@@ -82,8 +123,17 @@ export function extractStructuredSpreadsheet(text: string, originalName: string)
     subtotal_amount: null,
     tax_amount: null,
     total_amount: null,
+    raw_fields: [],
+    raw_tables: [{
+      title: "DMX Excel Order Export",
+      page: null,
+      headers: tableHeaders,
+      rows: rows.slice(headerIndex + 1).flatMap((row) => row.some((cell) => cell?.trim())
+        ? [tableHeaders.map((_, index) => row[index]?.normalize("NFC").trim() ?? "")]
+        : [])
+    }],
     items,
-    warnings: [],
+    warnings,
     confidence: 1
   });
 }
