@@ -535,6 +535,85 @@ const checks: Check[] = [
           WHERE table_schema = 'adempiere' AND table_name = 'kg_sp'
             AND column_name = 'barcode'`,
     expected: 1
+  },
+  {
+    name: "AD_Table cho 4 bảng đọc file AI",
+    sql: `SELECT count(*)::int AS count
+          FROM adempiere.ad_table
+          WHERE lower(tablename) IN ('kg_order_ai', 'kg_order_detail_ai', 'kg_order', 'kg_order_detail')
+            AND isactive = 'Y' AND isdeleteable = 'Y'`,
+    expected: 4
+  },
+  {
+    name: "Hai window đọc file AI đã public",
+    sql: `SELECT count(*)::int AS count
+          FROM adempiere.ad_window
+          WHERE name IN ('Chứng Từ Đọc File AI', 'Đơn Hàng Đọc File AI')
+            AND entitytype = 'KG' AND isactive = 'Y'`,
+    expected: 2
+  },
+  {
+    name: "Tab header/detail đọc file AI đúng link",
+    sql: `SELECT count(*)::int AS count
+          FROM adempiere.ad_tab detail
+          JOIN adempiere.ad_window win ON win.ad_window_id = detail.ad_window_id
+          JOIN adempiere.ad_column linkcol ON linkcol.ad_column_id = detail.ad_column_id
+          WHERE win.name IN ('Chứng Từ Đọc File AI', 'Đơn Hàng Đọc File AI')
+            AND detail.tablevel = 1
+            AND detail.isactive = 'Y'
+            AND lower(linkcol.columnname) IN ('kg_order_ai_id', 'kg_order_id')`,
+    expected: 2
+  },
+  {
+    name: "AD_Column đọc file AI đủ theo cột vật lý",
+    sql: `WITH physical AS (
+            SELECT table_name, count(*) AS physical_count
+            FROM information_schema.columns
+            WHERE table_schema = 'adempiere'
+              AND table_name IN ('kg_order_ai', 'kg_order_detail_ai', 'kg_order', 'kg_order_detail')
+            GROUP BY table_name
+          ),
+          dictionary AS (
+            SELECT lower(tablemeta.tablename) AS table_name, count(*) AS dictionary_count
+            FROM adempiere.ad_table tablemeta
+            JOIN adempiere.ad_column columnmeta ON columnmeta.ad_table_id = tablemeta.ad_table_id
+            WHERE lower(tablemeta.tablename) IN ('kg_order_ai', 'kg_order_detail_ai', 'kg_order', 'kg_order_detail')
+              AND columnmeta.isactive = 'Y'
+            GROUP BY lower(tablemeta.tablename)
+          )
+          SELECT count(*)::int AS count
+          FROM physical
+          JOIN dictionary USING (table_name)
+          WHERE physical.physical_count = dictionary.dictionary_count`,
+    expected: 4
+  },
+  {
+    name: "Role SAIGONADMIN có quyền ghi window đọc file AI",
+    sql: `SELECT count(DISTINCT win.ad_window_id)::int AS count
+          FROM adempiere.ad_window win
+          JOIN adempiere.ad_window_access access ON access.ad_window_id = win.ad_window_id
+          JOIN adempiere.ad_role rolemeta ON rolemeta.ad_role_id = access.ad_role_id
+          WHERE win.name IN ('Chứng Từ Đọc File AI', 'Đơn Hàng Đọc File AI')
+            AND access.isactive = 'Y'
+            AND access.isreadwrite = 'Y'
+            AND regexp_replace(upper(rolemeta.name), '[^A-Z0-9]', '', 'g')
+              IN ('SAIGONADMIN', 'SAIGONCOMMADMIN')`,
+    expected: 2
+  },
+  {
+    name: "Menu tenant SG có 2 window đọc file AI",
+    sql: `SELECT count(DISTINCT win.ad_window_id)::int AS count
+          FROM adempiere.ad_role rolemeta
+          JOIN adempiere.ad_tree tree ON tree.ad_tree_id = rolemeta.ad_tree_menu_id
+          JOIN adempiere.ad_treenodemm node ON node.ad_tree_id = tree.ad_tree_id
+            AND node.ad_client_id = rolemeta.ad_client_id
+          JOIN adempiere.ad_menu menu ON menu.ad_menu_id = node.node_id
+          JOIN adempiere.ad_window win ON win.ad_window_id = menu.ad_window_id
+          WHERE win.name IN ('Chứng Từ Đọc File AI', 'Đơn Hàng Đọc File AI')
+            AND menu.isactive = 'Y'
+            AND regexp_replace(upper(rolemeta.name), '[^A-Z0-9]', '', 'g')
+              IN ('SAIGONADMIN', 'SAIGONCOMMADMIN')`,
+    expected: 2
   }
 ];
 

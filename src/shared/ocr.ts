@@ -294,6 +294,7 @@ export interface DocumentRow {
   original_name: string;
   stored_name: string;
   storage_path: string;
+  upload_url?: string | null;
   mime_type: string;
   size_bytes: string;
   sha256: string;

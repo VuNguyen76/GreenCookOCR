@@ -8,7 +8,7 @@ import { fileTypeFromFile } from "file-type";
 import { z } from "zod";
 import { config } from "../config.js";
 import {
-  queuePublish,
+  confirmDocument,
   createBatch,
   deleteDocument,
   getDocument,
@@ -21,6 +21,7 @@ import { checkPoReferences } from "../idempiere/po-reference.js";
 
 const BatchSchema = z.object({ fileCount: z.number().int().positive().max(500) });
 const IdParams = z.object({ id: z.uuid() });
+const StoredNameParams = z.object({ storedName: z.string().min(1).max(200) });
 const ALLOWED_EXTENSIONS = new Set([
   ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff",
   ".doc", ".docx", ".xlsx", ".txt", ".csv"
@@ -28,6 +29,15 @@ const ALLOWED_EXTENSIONS = new Set([
 
 export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/health", async () => ({ ok: true }));
+
+  app.get("/api/uploads/:storedName", async (request, reply) => {
+    const { storedName } = StoredNameParams.parse(request.params);
+    const storagePath = safeDuplicateStoragePath(decodeURIComponent(storedName));
+    if (!await isFile(storagePath)) return reply.code(404).send({ error: "Không tìm thấy file đã upload" });
+    reply.header("Cache-Control", "private, max-age=3600");
+    return reply.type(mimeForExtension(path.extname(storagePath).toLowerCase()))
+      .send(fs.createReadStream(storagePath));
+  });
 
   app.post("/api/batches", async (request, reply) => {
     const input = BatchSchema.parse(request.body);
@@ -63,6 +73,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       const storedName = `${randomUUID()}${extension}`;
       const storagePath = path.join(config.uploadDir, storedName);
       await fsp.rename(temporaryPath, storagePath);
+      const uploadUrl = publicUploadUrl(request.headers.host, storedName);
 
       const document = await insertDocument({
         batchId,
@@ -70,6 +81,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         originalName,
         storedName,
         storagePath,
+        uploadUrl,
         mimeType,
         sizeBytes: stat.size,
         sha256
@@ -112,10 +124,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     if (!hasPoNumber) {
       return reply.code(409).send({ error: "Chưa đọc được Số PO nên chưa thể đối chiếu với hệ thống" });
     }
-    if (!await queuePublish(id)) {
-      return reply.code(409).send({ error: "Chỉ có thể xác nhận tài liệu đang cần kiểm tra hoặc đồng bộ lỗi" });
-    }
-    return { ok: true };
+    return await confirmDocument(id);
   });
 
   app.delete("/api/documents/:id", async (request, reply) => {
@@ -124,6 +133,9 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     if (!result.deleted) {
       if (result.reason === "not_found") {
         return reply.code(404).send({ error: "Không tìm thấy tài liệu" });
+      }
+      if (result.reason === "confirmed") {
+        return reply.code(409).send({ error: "Chứng từ đã đưa vào hệ thống nên không xóa ở hàng chờ tạm." });
       }
       return reply.code(409).send({ error: "Tài liệu đang được OCR. Vui lòng đợi xử lý xong rồi xóa." });
     }
@@ -195,4 +207,9 @@ function mimeForExtension(extension: string): string {
     ".csv": "text/csv"
   };
   return mapping[extension] ?? "application/octet-stream";
+}
+
+function publicUploadUrl(host: string | undefined, storedName: string): string {
+  const encodedName = encodeURIComponent(storedName);
+  return host ? `http://${host}/api/uploads/${encodedName}` : `/api/uploads/${encodedName}`;
 }

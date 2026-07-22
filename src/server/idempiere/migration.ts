@@ -9,6 +9,8 @@ const ENTITY_TYPE = "KG";
 const SAIGON_ADMIN_ROLE_KEYS = ["SAIGONADMIN", "SAIGONCOMMADMIN"];
 const WINDOW_NAME = "Đơn Đặt Hàng";
 const LEGACY_WINDOW_NAME = "Đơn Hàng OCR";
+const AI_SOURCE_WINDOW_NAME = "Chứng Từ Đọc File AI";
+const AI_ORDER_WINDOW_NAME = "Đơn Hàng Đọc File AI";
 const ORDER_TABLE_LABEL = "Đơn đặt hàng";
 const DETAIL_TABLE_LABEL = "Sản phẩm đơn hàng";
 const BLANK_STATUS_MESSAGE_VALUE = "KG_GreenCookBlankStatusLine";
@@ -83,6 +85,16 @@ interface ColumnSpec extends FieldSpec {
   defaultValue?: string;
   valRuleId?: number;
   referenceValueId?: number;
+}
+
+interface PhysicalColumn {
+  column_name: string;
+  data_type: string;
+  udt_name: string;
+  character_maximum_length: number | null;
+  numeric_precision: number | null;
+  numeric_scale: number | null;
+  is_nullable: "YES" | "NO";
 }
 
 const STANDARD_COLUMNS: ColumnSpec[] = [
@@ -427,16 +439,20 @@ const CORE_ORDER_LINE_OCR_FIELDS: FieldSpec[] = ORDER_LINE_OCR_COLUMNS
 
 export async function applyIdempiereMigration(): Promise<void> {
   const ddlPath = path.resolve("sql/idempiere/db_structure.sql");
+  const aiDdlPath = path.resolve("sql/idempiere/ai_reader_structure.sql");
   const ddl = await fs.readFile(ddlPath, "utf8");
+  const aiDdl = await fs.readFile(aiDdlPath, "utf8");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query(ddl);
+    await client.query(aiDdl);
     await ensureWebOrderSchema(client);
     await backfillOrderExtraFields(client);
     await clearNonCoreOrderFields(client);
     await ensureEntityType(client);
     const fieldGroups = await ensureFieldGroups(client);
+    await ensureAiReaderDictionary(client);
 
     const productTableId = await tableId(client, "kg_sp");
     const barcodeColumnId = await ensureColumn(client, productTableId, {
@@ -493,6 +509,366 @@ export async function applyIdempiereMigration(): Promise<void> {
   } finally {
     client.release();
   }
+}
+
+async function ensureAiReaderDictionary(client: PoolClient): Promise<void> {
+  const sourceHeader = await ensurePhysicalTableDictionary(client, "kg_order_ai", "Chứng từ đọc file");
+  const sourceDetail = await ensurePhysicalTableDictionary(client, "kg_order_detail_ai", "Sản phẩm đọc từ file");
+  const orderHeader = await ensurePhysicalTableDictionary(client, "kg_order", "Đơn hàng đọc file");
+  const orderDetail = await ensurePhysicalTableDictionary(client, "kg_order_detail", "Sản phẩm đơn hàng đọc file");
+
+  const sourceWindowId = await ensureNamedWindow(
+    client,
+    AI_SOURCE_WINDOW_NAME,
+    "Dữ liệu chứng từ và dòng sản phẩm đọc từ file"
+  );
+  await ensureAiWindowTabsAndFields(client, {
+    windowId: sourceWindowId,
+    header: sourceHeader,
+    detail: sourceDetail,
+    headerTabName: "Chứng từ",
+    detailTabName: "Dòng sản phẩm",
+    parentColumnName: "kg_order_ai_id"
+  });
+
+  const orderWindowId = await ensureNamedWindow(
+    client,
+    AI_ORDER_WINDOW_NAME,
+    "Đơn hàng trung gian đã tạo từ dữ liệu đọc file"
+  );
+  await ensureAiWindowTabsAndFields(client, {
+    windowId: orderWindowId,
+    header: orderHeader,
+    detail: orderDetail,
+    headerTabName: "Đơn hàng",
+    detailTabName: "Dòng sản phẩm",
+    parentColumnName: "kg_order_id"
+  });
+
+  for (const windowId of [sourceWindowId, orderWindowId]) {
+    const menuId = await ensureNamedMenu(client, windowId);
+    await ensureRoleMenuTree(client, SAIGON_ADMIN_ROLE_KEYS, menuId);
+    await ensureRoleWindowAccess(client, windowId, SAIGON_ADMIN_ROLE_KEYS);
+    await assertWindowMetadata(client, windowId);
+  }
+}
+
+async function ensurePhysicalTableDictionary(
+  client: PoolClient,
+  tableName: string,
+  tableLabel: string
+): Promise<{
+  tableName: string;
+  tableId: number;
+  columns: Map<string, number>;
+  fields: FieldSpec[];
+}> {
+  await ensureTableSequence(client, tableName);
+  const tableIdValue = await ensureTable(client, tableName, tableLabel);
+  const physicalColumns = await loadPhysicalColumns(client, tableName);
+  const specs = physicalColumns.map((column, index) =>
+    physicalColumnToSpec(tableName, column, index + 1)
+  );
+  const columns = await ensureColumns(client, tableIdValue, specs);
+  const fields = specs.map((spec) => ({
+    columnName: spec.columnName,
+    name: spec.name,
+    displayed: shouldDisplayAiField(spec.columnName),
+    fieldSeq: spec.fieldSeq,
+    sameLine: shouldDisplayAiField(spec.columnName) && (spec.fieldSeq ?? 0) % 30 !== 10,
+    readOnly: spec.updateable === false,
+    gridDisplayed: shouldDisplayAiGridField(spec.columnName),
+    gridSeq: shouldDisplayAiGridField(spec.columnName) ? spec.fieldSeq : 0
+  }));
+  return { tableName, tableId: tableIdValue, columns, fields };
+}
+
+async function loadPhysicalColumns(client: PoolClient, tableName: string): Promise<PhysicalColumn[]> {
+  const result = await client.query<PhysicalColumn>(`
+    SELECT column_name, data_type, udt_name, character_maximum_length,
+           numeric_precision, numeric_scale, is_nullable
+    FROM information_schema.columns
+    WHERE table_schema = 'adempiere' AND table_name = lower($1)
+    ORDER BY ordinal_position
+  `, [tableName]);
+  if (!result.rows.length) {
+    throw new Error(`Không tìm thấy cột vật lý của adempiere.${tableName}`);
+  }
+  return result.rows;
+}
+
+function physicalColumnToSpec(tableName: string, column: PhysicalColumn, index: number): ColumnSpec {
+  const columnName = column.column_name;
+  const reference = referenceForPhysicalColumn(column);
+  const isKey = columnName === `${tableName}_id`;
+  const isParent = columnName === parentColumnForDetailTable(tableName);
+  return {
+    columnName,
+    name: labelForAiColumn(columnName),
+    referenceId: isKey ? 13 : reference.referenceId,
+    referenceValueId: reference.referenceValueId,
+    valRuleId: reference.valRuleId,
+    fieldLength: fieldLengthForPhysicalColumn(column),
+    mandatory: column.is_nullable === "NO",
+    key: isKey,
+    parent: isParent,
+    identifier: identifierForAiColumn(columnName),
+    updateable: !isKey && !["ad_client_id", "created", "createdby", "updated", "updatedby"].includes(columnName),
+    defaultValue: defaultValueForAiColumn(columnName),
+    displayed: shouldDisplayAiField(columnName),
+    fieldSeq: index * 10
+  };
+}
+
+function referenceForPhysicalColumn(column: PhysicalColumn): {
+  referenceId: number;
+  referenceValueId?: number;
+  valRuleId?: number;
+} {
+  const name = column.column_name;
+  if (name === "createdby" || name === "updatedby" || name === "nhan_vien_kinh_doanh_id") {
+    return { referenceId: 30, referenceValueId: 110 };
+  }
+  if (name === "c_bpartner_id") return { referenceId: 30, valRuleId: 230 };
+  if (name === "c_uom_id") return { referenceId: 19, valRuleId: 210 };
+  if (name === "c_currency_id") return { referenceId: 19 };
+  if (name.endsWith("_id")) return { referenceId: 19 };
+  if (name === "isactive" || name === "kiem_tra_file" || name.endsWith("_matched")) return { referenceId: 20 };
+  if (column.data_type === "date") return { referenceId: 15 };
+  if (column.data_type.includes("timestamp")) return { referenceId: 16 };
+  if (column.udt_name === "jsonb" || column.data_type === "text") return { referenceId: 14 };
+  if (column.data_type === "integer") return { referenceId: 11 };
+  if (column.data_type === "numeric") {
+    if (name.includes("so_luong")) return { referenceId: 29 };
+    if (/(tien|gia|thanh|amount|total|tax|discount|vat)/.test(name)) return { referenceId: 12 };
+    if ((column.numeric_scale ?? 0) === 0) return { referenceId: 11 };
+    return { referenceId: 22 };
+  }
+  return { referenceId: 10 };
+}
+
+function fieldLengthForPhysicalColumn(column: PhysicalColumn): number {
+  if (column.character_maximum_length) return column.character_maximum_length;
+  if (column.udt_name === "jsonb" || column.data_type === "text") return 4000;
+  if (column.data_type === "date") return 7;
+  if (column.data_type.includes("timestamp")) return 29;
+  if (column.data_type === "integer") return 10;
+  if (column.data_type === "numeric") return column.numeric_precision ?? 24;
+  return 255;
+}
+
+function defaultValueForAiColumn(columnName: string): string | undefined {
+  if (columnName === "ad_client_id") return "@#AD_Client_ID@";
+  if (columnName === "ad_org_id") return "@#AD_Org_ID@";
+  if (columnName === "isactive") return "Y";
+  if (columnName === "created" || columnName === "updated") return "SYSDATE";
+  if (columnName === "createdby" || columnName === "updatedby") return "@#AD_User_ID@";
+  if (columnName === "c_currency_id") return "@#C_Currency_ID@";
+  return undefined;
+}
+
+function parentColumnForDetailTable(tableName: string): string {
+  if (tableName === "kg_order_detail_ai") return "kg_order_ai_id";
+  if (tableName === "kg_order_detail") return "kg_order_id";
+  return "";
+}
+
+function identifierForAiColumn(columnName: string): boolean {
+  return ["value", "so_po", "order_id", "tieu_de_chung_tu", "ten_file_nguon"].includes(columnName);
+}
+
+function shouldDisplayAiField(columnName: string): boolean {
+  return ![
+    "ad_client_id", "ad_org_id", "isactive", "created", "createdby", "updated", "updatedby",
+    "raw_json", "raw_text", "source_sha256", "batch_id", "batch_position",
+    "stored_name", "storage_path", "attempts", "next_attempt_at", "error_message",
+    "started_at", "completed_at", "gemini_file_name", "model", "prompt_version",
+    "published_kg_order_id", "published_at", "gia_da_gom_thue"
+  ].includes(columnName);
+}
+
+function shouldDisplayAiGridField(columnName: string): boolean {
+  return [
+    "value", "so_po", "order_id", "ngay_dat_hang", "ngay_giao_hang",
+    "ten_nha_cung_cap", "ma_cua_hang", "ten_cua_hang", "ten_ben_mua", "tong_tien", "tong_tien_sau_thue",
+    "dong", "ma_san_pham_khach_hang", "ma_san_pham_nha_cung_cap", "barcode",
+    "ten_san_pham_khach_hang", "so_luong", "don_vi_tinh", "thanh_tien"
+  ].includes(columnName);
+}
+
+function labelForAiColumn(columnName: string): string {
+  const labels: Record<string, string> = {
+    kg_order_ai_id: "Chứng từ đọc file",
+    kg_order_detail_ai_id: "Dòng sản phẩm đọc file",
+    kg_order_id: "Đơn hàng đọc file",
+    kg_order_detail_id: "Dòng sản phẩm đơn hàng",
+    value: "Số chứng từ",
+    description: "Ghi chú",
+    ma_tai_lieu_nguon: "Mã tài liệu nguồn",
+    thu_tu_phieu_trong_file: "Thứ tự phiếu trong file",
+    source_sha256: "SHA-256 file nguồn",
+    ten_file_nguon: "Tên file nguồn",
+    duoi_file: "Đuôi file",
+    loai_mime: "Loại MIME",
+    kich_thuoc_file: "Kích thước file",
+    so_trang: "Số trang",
+    phuong_thuc_trich_xuat: "Phương thức đọc",
+    raw_text: "Nội dung thô",
+    raw_json: "JSON thô",
+    tieu_de_chung_tu: "Tiêu đề chứng từ",
+    loai_chung_tu: "Loại chứng từ",
+    so_po: "Số PO",
+    order_id: "Order ID",
+    ngay_dat_hang: "Ngày đặt hàng",
+    ngay_giao_hang: "Ngày giao hàng",
+    ngay_xuat_hoa_don: "Ngày xuất hóa đơn",
+    ma_nha_cung_cap: "Mã nhà cung cấp",
+    ten_nha_cung_cap: "Tên nhà cung cấp",
+    c_bpartner_id: "Đối tác iDempiere",
+    ma_cua_hang: "Mã cửa hàng",
+    ten_cua_hang: "Tên cửa hàng",
+    dia_chi_giao_hang: "Địa chỉ giao hàng",
+    ten_nhan_vien_kinh_doanh: "Tên nhân viên kinh doanh",
+    nhan_vien_kinh_doanh_id: "Nhân viên kinh doanh",
+    trang_thai_don_hang: "Trạng thái đơn hàng",
+    trang_thai_xu_ly: "Trạng thái xử lý",
+    ma_khuyen_mai: "Mã khuyến mãi",
+    tien_hang: "Tiền hàng",
+    ty_le_vat: "Tỷ lệ VAT",
+    tien_thue: "Tiền thuế",
+    tong_tien: "Tổng tiền",
+    tong_tien_sau_thue: "Tổng tiền sau thuế",
+    ma_tien_te: "Mã tiền tệ",
+    c_currency_id: "Tiền tệ",
+    kg_po_id: "PO iDempiere",
+    thoi_gian_xac_nhan: "Thời gian xác nhận",
+    kiem_tra_file: "Kiểm tra file",
+    kg_po_d_id: "Dòng PO iDempiere",
+    dong: "Dòng",
+    dong_nguon: "Dòng nguồn",
+    trang_nguon: "Trang nguồn",
+    barcode: "Barcode",
+    ten_san_pham_khach_hang: "Tên sản phẩm khách hàng",
+    ten_san_pham_cong_ty: "Tên sản phẩm công ty",
+    quy_cach: "Quy cách",
+    so_luong: "Số lượng",
+    don_vi_tinh: "Đơn vị tính",
+    so_luong_quy_doi: "Số lượng quy đổi",
+    kg_sp_id: "Sản phẩm iDempiere",
+    c_uom_id: "Đơn vị iDempiere",
+    don_gia_khach_hang: "Đơn giá khách hàng",
+    don_gia_cong_ty: "Đơn giá công ty",
+    thanh_tien: "Thành tiền",
+    trang_thai_lien_ket: "Trạng thái liên kết"
+  };
+  return labels[columnName] ?? columnName
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+async function ensureNamedWindow(
+  client: PoolClient,
+  name: string,
+  description: string
+): Promise<number> {
+  const existing = await client.query<{ ad_window_id: string }>(`
+    SELECT ad_window_id FROM adempiere.ad_window
+    WHERE name = $1
+    ORDER BY ad_window_id
+    LIMIT 1
+  `, [name]);
+  if (existing.rows[0]) {
+    const id = Number(existing.rows[0].ad_window_id);
+    await client.query(`
+      UPDATE adempiere.ad_window SET name = $1, description = $2,
+        windowtype = 'M', issotrx = 'N', entitytype = $3, isactive = 'Y',
+        updated = now(), updatedby = $4
+      WHERE ad_window_id = $5
+    `, [name, description, ENTITY_TYPE, SYSTEM_USER_ID, id]);
+    return id;
+  }
+  const id = await nextId(client, "AD_Window");
+  await client.query(`
+    INSERT INTO adempiere.ad_window(
+      ad_window_id, ad_client_id, ad_org_id, createdby, updatedby,
+      name, description, windowtype, issotrx, entitytype, processing,
+      isdefault, isbetafunctionality, isactive
+    ) VALUES ($1, 0, 0, $2, $2, $3, $4, 'M', 'N', $5,
+      'N', 'N', 'N', 'Y')
+  `, [id, SYSTEM_USER_ID, name, description, ENTITY_TYPE]);
+  return id;
+}
+
+async function ensureNamedMenu(client: PoolClient, windowId: number): Promise<number> {
+  const windowRow = await client.query<{ name: string; description: string | null }>(`
+    SELECT name, description FROM adempiere.ad_window WHERE ad_window_id = $1
+  `, [windowId]);
+  const windowName = windowRow.rows[0]?.name;
+  if (!windowName) throw new Error(`Không tìm thấy AD_Window ${windowId}`);
+
+  const existing = await client.query<{ ad_menu_id: string }>(`
+    SELECT ad_menu_id FROM adempiere.ad_menu WHERE ad_window_id = $1
+  `, [windowId]);
+  if (existing.rows[0]) {
+    const id = Number(existing.rows[0].ad_menu_id);
+    await client.query(`
+      UPDATE adempiere.ad_menu SET name = $1, description = $2,
+        action = 'W', ad_window_id = $3, issummary = 'N', issotrx = 'N',
+        isreadonly = 'N', entitytype = $4, isactive = 'Y',
+        updated = now(), updatedby = $5
+      WHERE ad_menu_id = $6
+    `, [windowName, windowRow.rows[0].description, windowId, ENTITY_TYPE, SYSTEM_USER_ID, id]);
+    return id;
+  }
+  const id = await nextId(client, "AD_Menu");
+  await client.query(`
+    INSERT INTO adempiere.ad_menu(
+      ad_menu_id, ad_client_id, ad_org_id, createdby, updatedby,
+      name, description, action, ad_window_id, issummary, issotrx,
+      isreadonly, iscentrallymaintained, entitytype, isactive
+    ) VALUES ($1, 0, 0, $2, $2, $3, $4, 'W', $5,
+      'N', 'N', 'N', 'Y', $6, 'Y')
+  `, [id, SYSTEM_USER_ID, windowName, windowRow.rows[0].description, windowId, ENTITY_TYPE]);
+  return id;
+}
+
+async function ensureAiWindowTabsAndFields(
+  client: PoolClient,
+  input: {
+    windowId: number;
+    header: { tableId: number; columns: Map<string, number>; fields: FieldSpec[] };
+    detail: { tableId: number; columns: Map<string, number>; fields: FieldSpec[] };
+    headerTabName: string;
+    detailTabName: string;
+    parentColumnName: string;
+  }
+): Promise<void> {
+  const headerTabId = await ensureTab(client, {
+    windowId: input.windowId,
+    tableId: input.header.tableId,
+    name: input.headerTabName,
+    seqNo: 10,
+    tableLevel: 0,
+    singleRow: true,
+    readOnly: false,
+    orderBy: "Created DESC"
+  });
+  const detailTabId = await ensureTab(client, {
+    windowId: input.windowId,
+    tableId: input.detail.tableId,
+    name: input.detailTabName,
+    seqNo: 20,
+    tableLevel: 1,
+    singleRow: false,
+    readOnly: false,
+    linkColumnId: input.detail.columns.get(input.parentColumnName.toLowerCase()),
+    parentColumnId: input.header.columns.get(input.parentColumnName.toLowerCase()),
+    orderBy: "Dong"
+  });
+  await ensureFields(client, headerTabId, input.header.fields, input.header.columns, new Map());
+  await ensureFields(client, detailTabId, input.detail.fields, input.detail.columns, new Map());
 }
 
 async function backfillOrderExtraFields(client: PoolClient): Promise<void> {

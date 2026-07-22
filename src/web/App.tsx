@@ -25,6 +25,7 @@ type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "compl
 interface DocumentSummary {
   id: string;
   original_name: string;
+  upload_url?: string | null;
   mime_type: string;
   size_bytes: string;
   status: Status;
@@ -402,9 +403,9 @@ function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm,
   const warnings = [...new Set(document.warnings
     .map(displayUserMessage)
     .filter((warning): warning is string => Boolean(warning)))];
-  const canRetry = (["failed", "needs_review", "completed"] as Status[]).includes(document.status);
+  const canRetry = (["failed", "needs_review", "completed", "published"] as Status[]).includes(document.status);
   const canDelete = !isProcessingStatus(document.status);
-  const canConfirm = (["needs_review", "publish_failed"] as Status[]).includes(document.status);
+  const canConfirm = false;
   const hasPoNumber = Boolean(document.po_number) || poNumbers.length > 0;
   const duplicatePo = document.po_references.some((check) => check.matched);
   const readyToPublish = hasPoNumber;
@@ -437,7 +438,7 @@ function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm,
       </button>
       {warningsExpanded && <div className="collapse-content">{warnings.map((warning) => <div key={warning}><AlertTriangle size={14} /><span>{warning}</span></div>)}</div>}
     </section>}
-    {document.status === "published" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã tạo đơn nháp trong iDempiere</strong><span>ID đơn iDempiere: {document.published_order_ids.join(", ") || "Đã lưu thành công"}</span></div></div>}
+    {document.status === "published" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã chuyển sang bảng đơn hàng</strong><span>ID đơn: {document.published_order_ids.join(", ") || "Đã lưu thành công"}; chỉnh sửa tiếp trong iDempiere.</span></div></div>}
     {canConfirm && <section className={`mapping-band collapsible-panel ${poChecksExpanded ? "expanded" : ""}`}>
       <button type="button" className="collapse-trigger" aria-expanded={poChecksExpanded} onClick={() => setPoChecksExpanded((current) => !current)}>
         <span><CheckCircle2 size={15} /><strong>Kiểm tra số PO</strong><small>{document.po_references.length || (hasPoNumber ? 1 : 0)} số</small></span>
@@ -487,6 +488,7 @@ function ItemExtraFields({ item }: { item: DocumentDetail["items"][number] }) {
 function buildDocumentFields(document: DocumentDetail, poSummary: string, hasRowOrders: boolean): Array<{ label: string; value: string }> {
   const fields: Array<[string, unknown]> = [
     ["Tệp gốc", document.original_name],
+    ["Link file", document.upload_url],
     ["Loại chứng từ", documentTypeLabel(document.template_key)],
     [hasRowOrders ? "Số PO trong file" : "Số PO", poSummary],
     ["Ngày PO", formatDate(document.po_date)],
