@@ -446,7 +446,7 @@ export async function applyIdempiereMigration(): Promise<void> {
   try {
     await client.query("BEGIN");
     await client.query(ddl);
-    await client.query(aiDdl);
+    void aiDdl;
     await ensureWebOrderSchema(client);
     await backfillOrderExtraFields(client);
     await clearNonCoreOrderFields(client);
@@ -512,10 +512,15 @@ export async function applyIdempiereMigration(): Promise<void> {
 }
 
 async function ensureAiReaderDictionary(client: PoolClient): Promise<void> {
+  /*
   const sourceHeader = await ensurePhysicalTableDictionary(client, "kg_order_ai", "Chứng từ đọc file");
   const sourceDetail = await ensurePhysicalTableDictionary(client, "kg_order_detail_ai", "Sản phẩm đọc từ file");
   const orderHeader = await ensurePhysicalTableDictionary(client, "kg_order", "Đơn hàng đọc file");
   const orderDetail = await ensurePhysicalTableDictionary(client, "kg_order_detail", "Sản phẩm đơn hàng đọc file");
+
+  */
+  const runtimeHeader = await ensurePhysicalTableDictionary(client, "kg_order_ai_test", "Chung tu doc file");
+  const runtimeDetail = await ensurePhysicalTableDictionary(client, "kg_order_detail_ai_test", "San pham doc tu file");
 
   const sourceWindowId = await ensureNamedWindow(
     client,
@@ -524,11 +529,11 @@ async function ensureAiReaderDictionary(client: PoolClient): Promise<void> {
   );
   await ensureAiWindowTabsAndFields(client, {
     windowId: sourceWindowId,
-    header: sourceHeader,
-    detail: sourceDetail,
+    header: runtimeHeader,
+    detail: runtimeDetail,
     headerTabName: "Chứng từ",
     detailTabName: "Dòng sản phẩm",
-    parentColumnName: "kg_order_ai_id"
+    parentColumnName: "kg_order_ai_test_id"
   });
 
   const orderWindowId = await ensureNamedWindow(
@@ -538,11 +543,11 @@ async function ensureAiReaderDictionary(client: PoolClient): Promise<void> {
   );
   await ensureAiWindowTabsAndFields(client, {
     windowId: orderWindowId,
-    header: orderHeader,
-    detail: orderDetail,
+    header: runtimeHeader,
+    detail: runtimeDetail,
     headerTabName: "Đơn hàng",
     detailTabName: "Dòng sản phẩm",
-    parentColumnName: "kg_order_id"
+    parentColumnName: "kg_order_ai_test_id"
   });
 
   for (const windowId of [sourceWindowId, orderWindowId]) {
@@ -668,6 +673,7 @@ function defaultValueForAiColumn(columnName: string): string | undefined {
 }
 
 function parentColumnForDetailTable(tableName: string): string {
+  if (tableName === "kg_order_detail_ai_test") return "kg_order_ai_test_id";
   if (tableName === "kg_order_detail_ai") return "kg_order_ai_id";
   if (tableName === "kg_order_detail") return "kg_order_id";
   return "";

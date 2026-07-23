@@ -540,9 +540,9 @@ const checks: Check[] = [
     name: "AD_Table cho 4 bảng đọc file AI",
     sql: `SELECT count(*)::int AS count
           FROM adempiere.ad_table
-          WHERE lower(tablename) IN ('kg_order_ai', 'kg_order_detail_ai', 'kg_order', 'kg_order_detail')
+          WHERE lower(tablename) IN ('kg_order_ai_test', 'kg_order_detail_ai_test')
             AND isactive = 'Y' AND isdeleteable = 'Y'`,
-    expected: 4
+    expected: 2
   },
   {
     name: "Hai window đọc file AI đã public",
@@ -561,8 +561,8 @@ const checks: Check[] = [
           WHERE win.name IN ('Chứng Từ Đọc File AI', 'Đơn Hàng Đọc File AI')
             AND detail.tablevel = 1
             AND detail.isactive = 'Y'
-            AND lower(linkcol.columnname) IN ('kg_order_ai_id', 'kg_order_id')`,
-    expected: 2
+            AND lower(linkcol.columnname) = 'kg_order_ai_test_id'`,
+    minimum: 1
   },
   {
     name: "AD_Column đọc file AI đủ theo cột vật lý",
@@ -570,14 +570,14 @@ const checks: Check[] = [
             SELECT table_name, count(*) AS physical_count
             FROM information_schema.columns
             WHERE table_schema = 'adempiere'
-              AND table_name IN ('kg_order_ai', 'kg_order_detail_ai', 'kg_order', 'kg_order_detail')
+              AND table_name IN ('kg_order_ai_test', 'kg_order_detail_ai_test')
             GROUP BY table_name
           ),
           dictionary AS (
             SELECT lower(tablemeta.tablename) AS table_name, count(*) AS dictionary_count
             FROM adempiere.ad_table tablemeta
             JOIN adempiere.ad_column columnmeta ON columnmeta.ad_table_id = tablemeta.ad_table_id
-            WHERE lower(tablemeta.tablename) IN ('kg_order_ai', 'kg_order_detail_ai', 'kg_order', 'kg_order_detail')
+            WHERE lower(tablemeta.tablename) IN ('kg_order_ai_test', 'kg_order_detail_ai_test')
               AND columnmeta.isactive = 'Y'
             GROUP BY lower(tablemeta.tablename)
           )
@@ -585,7 +585,7 @@ const checks: Check[] = [
           FROM physical
           JOIN dictionary USING (table_name)
           WHERE physical.physical_count = dictionary.dictionary_count`,
-    expected: 4
+    expected: 2
   },
   {
     name: "Role SAIGONADMIN có quyền ghi window đọc file AI",

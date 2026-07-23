@@ -98,14 +98,15 @@ export class StagingRepository {
 
   async listDocuments(limit = 200): Promise<DocumentRow[]> {
     const rows = await this.database.query<Record<string, unknown>>(`
-      SELECT ${DOCUMENT_SELECT},
-             count(detail.kg_order_detail_ai_test_id)::int AS item_count
+      SELECT ${DOCUMENT_LIST_SELECT},
+             (
+               SELECT count(*)::int
+               FROM adempiere.kg_order_detail_ai_test detail
+               WHERE detail.kg_order_ai_test_id = document.kg_order_ai_test_id
+             ) AS item_count
       FROM adempiere.kg_order_ai_test document
-      LEFT JOIN adempiere.kg_order_detail_ai_test detail
-        ON detail.kg_order_ai_test_id = document.kg_order_ai_test_id
       WHERE document.ad_client_id = $1
         AND document.ma_tai_lieu_nguon IS NOT NULL
-      GROUP BY document.kg_order_ai_test_id
       ORDER BY document.created DESC, document.kg_order_ai_test_id DESC
       LIMIT $2
     `, [config.targetAdClientId, limit]);
@@ -235,9 +236,44 @@ export class StagingRepository {
     const auditsByLine = new Map(reconciliation.lines.map((line) => [line.lineNo, line]));
     const rawItems = getRawItems(rawResult);
     const firstItem = normalized.items[0];
-    const storeCode = firstItem?.store_code ?? normalized.warehouse_code ?? normalized.buyer_code ?? null;
-    const storeName = firstItem?.store_name ?? normalized.warehouse_name ?? null;
-    const deliveryAddress = normalized.delivery_address ?? normalized.ship_to_address ?? firstItem?.delivery_address ?? null;
+    const storeCode = firstNonEmpty([
+      firstItem?.store_code,
+      normalized.warehouse_code,
+      normalized.buyer_code,
+      firstItem?.warehouse_code
+    ]);
+    const storeName = firstNonEmpty([
+      firstItem?.store_name,
+      normalized.warehouse_name,
+      firstItem?.warehouse_name,
+      normalized.buyer_name,
+      normalized.issuer_branch
+    ]);
+    const deliveryAddress = firstNonEmpty([
+      normalized.delivery_address,
+      normalized.ship_to_address,
+      firstItem?.delivery_address
+    ]);
+    const orderDate = firstNonEmpty([
+      normalized.po_date,
+      firstItem?.po_date,
+      normalized.delivery_date,
+      firstItem?.promised_date ?? null
+    ]);
+    const deliveryDate = firstNonEmpty([
+      normalized.delivery_date,
+      firstItem?.promised_date ?? null,
+      firstItem?.po_date,
+      normalized.po_date
+    ]);
+    const salesContact = joinText([normalized.order_contact, normalized.contact_phone], " - ");
+    const partnerNames = uniqueLower([
+      normalized.buyer_name,
+      normalized.issuer_name,
+      storeName,
+      normalized.supplier_name
+    ]);
+    const headerVatRate = firstNonEmpty(normalized.items.map((item) => item.vat_rate));
     const client = await this.database.connect();
     try {
       await client.query("BEGIN");
@@ -300,13 +336,16 @@ export class StagingRepository {
               reconciledByAi: audit.reconciledByAi
             } : null
           }),
-          item.vendor_product_code ? `MÃ£ NCC: ${item.vendor_product_code}` : null
+          joinText([
+            item.product_code ? `Ma SP: ${item.product_code}` : null,
+            item.vendor_product_code ? `Ma NCC: ${item.vendor_product_code}` : null
+          ], "; ")
         ]);
       }
 
       await client.query(`
         UPDATE adempiere.kg_order_ai_test SET
-          trang_thai_xu_ly = 'published',
+          trang_thai_xu_ly = 'Chưa xác nhận',
           value = coalesce($3, $4, ma_tai_lieu_nguon),
           tieu_de_chung_tu = $5,
           loai_chung_tu = $6,
@@ -324,12 +363,30 @@ export class StagingRepository {
           tong_tien = $16::numeric,
           tong_tien_sau_thue = $16::numeric,
           ma_tien_te = coalesce($17, 'VND'),
+          c_currency_id = coalesce(c_currency_id, (
+            SELECT currency.c_currency_id
+            FROM adempiere.c_currency currency
+            WHERE currency.iso_code = coalesce($17, 'VND')
+            ORDER BY currency.c_currency_id
+            LIMIT 1
+          )),
+          c_bpartner_id = coalesce(c_bpartner_id, (
+            SELECT partner.c_bpartner_id
+            FROM adempiere.c_bpartner partner
+            WHERE partner.ad_client_id IN (0, $23)
+              AND partner.isactive = 'Y'
+              AND lower(trim(partner.name)) = ANY($22::text[])
+            ORDER BY partner.ad_client_id DESC, partner.c_bpartner_id
+            LIMIT 1
+          )),
+          ten_nhan_vien_kinh_doanh = $20,
+          ty_le_vat = $21::numeric,
           phuong_thuc_trich_xuat = $18,
           raw_json = coalesce(raw_json, '{}'::jsonb) || $19::jsonb,
-          thoi_gian_xac_nhan = now(),
+          thoi_gian_xac_nhan = NULL,
           kiem_tra_file = 'Y',
-          button_confirm = 'Y',
-          button_xacnhan = 'Y',
+          button_confirm = 'N',
+          button_xacnhan = 'N',
           description = NULL,
           updated = now(),
           updatedby = $1
@@ -341,8 +398,8 @@ export class StagingRepository {
         normalized.document_number ?? normalized.reference_number ?? normalized.po_number,
         normalized.document_title,
         normalized.document_type,
-        normalizeDateForDb(normalized.po_date),
-        normalizeDateForDb(normalized.delivery_date),
+        normalizeDateForDb(orderDate),
+        normalizeDateForDb(deliveryDate),
         normalized.supplier_code ?? null,
         normalized.supplier_name,
         storeCode,
@@ -369,10 +426,14 @@ export class StagingRepository {
             completed_at: new Date().toISOString()
           },
           completed_at: new Date().toISOString()
-        })
+        }),
+        salesContact,
+        numericOrNull(headerVatRate),
+        partnerNames,
+        config.targetAdClientId
       ]);
       await client.query("COMMIT");
-      return "published";
+      return "Chưa xác nhận";
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -431,7 +492,7 @@ export class StagingRepository {
       config.targetAdUserId,
       id,
       config.targetAdClientId,
-      ["failed", "needs_review", "completed", "publish_failed", "published", "preprocessing", "ocr_running", "validating"]
+      ["failed", "needs_review", "completed", "publish_failed", "published", "Chưa xác nhận", "preprocessing", "ocr_running", "validating"]
     ]);
     return Number(result.rowCount) > 0;
   }
@@ -661,7 +722,44 @@ const DOCUMENT_SELECT = `
   document.raw_json->'normalized_result' AS normalized_result,
   document.raw_json->'reconciliation_result' AS reconciliation_result,
   CASE
-    WHEN document.trang_thai_xu_ly = 'published' THEN jsonb_build_array(document.kg_order_ai_test_id::text)
+    WHEN document.trang_thai_xu_ly IN ('published', 'Chưa xác nhận') THEN jsonb_build_array(document.kg_order_ai_test_id::text)
+    ELSE '[]'::jsonb
+  END AS published_order_ids,
+  document.created::text AS created_at,
+  document.updated::text AS updated_at,
+  coalesce(document.raw_json->'runtime'->>'completed_at', document.raw_json->>'completed_at') AS completed_at
+`;
+
+const DOCUMENT_LIST_SELECT = `
+  document.ma_tai_lieu_nguon AS id,
+  document.raw_json->'upload'->>'batch_id' AS batch_id,
+  coalesce((document.raw_json->'upload'->>'batch_position')::int, document.thu_tu_phieu_trong_file) AS batch_position,
+  document.ten_file_nguon AS original_name,
+  document.raw_json->'upload'->>'stored_name' AS stored_name,
+  document.raw_json->'upload'->>'storage_path' AS storage_path,
+  coalesce(document.upload_url, document.raw_json->'upload'->>'upload_url') AS upload_url,
+  document.loai_mime AS mime_type,
+  document.kich_thuoc_file::text AS size_bytes,
+  document.source_sha256 AS sha256,
+  coalesce(document.trang_thai_xu_ly, 'queued') AS status,
+  document.tieu_de_chung_tu AS document_title,
+  coalesce(document.raw_json->'normalized_result'->>'template_key', document.phuong_thuc_trich_xuat) AS template_key,
+  coalesce(document.raw_json->'normalized_result'->>'issuer_name', document.ten_nha_cung_cap, document.ten_cua_hang) AS issuer_name,
+  document.so_po AS po_number,
+  document.ngay_dat_hang::text AS po_date,
+  document.ngay_giao_hang::text AS delivery_date,
+  coalesce(document.ma_tien_te, document.raw_json->'normalized_result'->>'currency') AS currency,
+  document.ten_nha_cung_cap AS supplier_name,
+  coalesce(document.raw_json->'normalized_result'->>'buyer_name', document.ten_cua_hang) AS buyer_name,
+  document.dia_chi_giao_hang AS delivery_address,
+  document.tien_hang::text AS subtotal_amount,
+  document.tien_thue::text AS tax_amount,
+  coalesce(document.tong_tien_sau_thue, document.tong_tien)::text AS total_amount,
+  coalesce((document.raw_json->'upload'->>'attempts')::int, 0) AS attempts,
+  coalesce(document.raw_json->'runtime'->>'error_message', document.description) AS error_message,
+  coalesce(document.raw_json->'warnings', '[]'::jsonb) AS warnings,
+  CASE
+    WHEN document.trang_thai_xu_ly IN ('published', 'Chưa xác nhận') THEN jsonb_build_array(document.kg_order_ai_test_id::text)
     ELSE '[]'::jsonb
   END AS published_order_ids,
   document.created::text AS created_at,
@@ -759,6 +857,28 @@ function numericOrNull(value: unknown): string | null {
   if (value === null || value === undefined || value === "") return null;
   const text = String(value);
   return /^-?\d+(?:\.\d+)?$/.test(text) ? text : null;
+}
+
+function firstNonEmpty(values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
+function joinText(values: Array<string | null | undefined>, separator: string): string | null {
+  const parts = values
+    .map((value) => typeof value === "string" ? value.trim() : "")
+    .filter(Boolean);
+  return parts.length ? parts.join(separator) : null;
+}
+
+function uniqueLower(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values
+    .map((value) => typeof value === "string" ? value.trim().toLowerCase() : "")
+    .filter(Boolean))];
 }
 
 function booleanFlag(value: unknown): "Y" | "N" | null {

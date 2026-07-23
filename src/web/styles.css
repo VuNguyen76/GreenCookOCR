@@ -299,7 +299,7 @@ code { font-size: 11px; color: #5a665f; }
   white-space: nowrap;
 }
 .status-queued, .status-retrying { color: #0d573a; background: #e4f2eb; }
-.status-preprocessing, .status-ocr_running, .status-validating, .status-publishing,
+.status-preprocessing, .status-ocr_running, .status-validating, .status-publishing, .status-waiting,
 .status-needs_review { color: #865705; background: #fff0cc; }
 .status-completed, .status-published { color: #0e5c3d; background: #e2f2ea; }
 .status-failed, .status-publish_failed { color: #983728; background: #fae4df; }

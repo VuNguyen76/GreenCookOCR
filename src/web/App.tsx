@@ -20,7 +20,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { localizeOcrWarning } from "../shared/warning-messages.js";
 
-type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "completed" | "needs_review" | "failed" | "publishing" | "published" | "publish_failed";
+type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "completed" | "needs_review" | "Chưa xác nhận" | "failed" | "publishing" | "published" | "publish_failed";
 
 interface DocumentSummary {
   id: string;
@@ -108,6 +108,7 @@ const STATUS_LABELS: Record<Status, string> = {
   validating: "Đang kiểm tra",
   completed: "Sẵn sàng",
   needs_review: "Cần xem lại",
+  "Chưa xác nhận": "Chờ xác nhận",
   failed: "Không xử lý được",
   publishing: "Đang lưu",
   published: "Đã đưa vào hệ thống",
@@ -115,6 +116,8 @@ const STATUS_LABELS: Record<Status, string> = {
 };
 const VI_NUMBER_FORMAT = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 6 });
 type DocumentFilter = "all" | "review" | "processing" | "published";
+const ACTIVE_POLL_MS = 5000;
+const IDLE_POLL_MS = 60000;
 
 export function App() {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
@@ -129,19 +132,60 @@ export function App() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<DocumentFilter>("all");
   const inputRef = useRef<HTMLInputElement>(null);
+  const refreshInFlightRef = useRef(false);
+  const documentsRef = useRef<DocumentSummary[]>([]);
+  const uploadingRef = useRef(false);
+  const retryingCountRef = useRef(0);
+
+  useEffect(() => {
+    documentsRef.current = documents;
+    uploadingRef.current = uploading;
+    retryingCountRef.current = retryingIds.size;
+  }, [documents, retryingIds.size, uploading]);
 
   const loadDocuments = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    try {
     const response = await fetch("/api/documents");
     if (!response.ok) throw new Error("Không tải được hàng đợi");
     const data = await response.json();
     setDocuments(data.documents);
     setStats(data.stats);
+    } finally {
+      refreshInFlightRef.current = false;
+    }
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const schedule = (delay: number) => {
+      timer = window.setTimeout(async () => {
+        if (cancelled || document.hidden) {
+          schedule(IDLE_POLL_MS);
+          return;
+        }
+        await loadDocuments().catch(() => undefined);
+        const hasActiveWork = uploadingRef.current
+          || retryingCountRef.current > 0
+          || documentsRef.current.some((item) => isProcessingStatus(item.status));
+        schedule(hasActiveWork ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+      }, delay);
+    };
+
     void loadDocuments().catch((reason) => setError(reason.message));
-    const timer = setInterval(() => void loadDocuments().catch(() => undefined), 2000);
-    return () => clearInterval(timer);
+    schedule(ACTIVE_POLL_MS);
+
+    const onVisibilityChange = () => {
+      if (!document.hidden) void loadDocuments().catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [loadDocuments]);
 
   const openDocument = useCallback(async (id: string) => {
@@ -183,8 +227,8 @@ export function App() {
           const payload = await response.json().catch(() => ({}));
           throw new Error(`${file.name}: ${payload.error ?? "Upload thất bại"}`);
         }
-        await loadDocuments();
       }
+      await loadDocuments();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -262,6 +306,7 @@ export function App() {
 
   const total = useMemo(() => Object.values(stats).reduce((sum, count) => sum + count, 0), [stats]);
   const processing = (stats.queued ?? 0) + (stats.preprocessing ?? 0) + (stats.ocr_running ?? 0) + (stats.validating ?? 0) + (stats.publishing ?? 0);
+  const waitingForConfirm = stats["Chưa xác nhận"] ?? 0;
   const issues = (stats.failed ?? 0) + (stats.needs_review ?? 0) + (stats.publish_failed ?? 0);
   const visibleDocuments = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase("vi");
@@ -271,7 +316,7 @@ export function App() {
       const matchesFilter = filter === "all"
         || (filter === "review" && ["needs_review", "failed", "publish_failed"].includes(document.status))
         || (filter === "processing" && isProcessingStatus(document.status))
-        || (filter === "published" && document.status === "published");
+        || (filter === "published" && ["Chưa xác nhận", "published"].includes(document.status));
       return matchesQuery && matchesFilter;
     });
   }, [documents, filter, query]);
@@ -304,7 +349,7 @@ export function App() {
         <section className="metrics-band">
           <Metric label="Tất cả tài liệu" value={total} icon={<FileText size={18} />} />
           <Metric label="Đang xử lý" value={processing} icon={<Clock3 size={18} />} tone="amber" />
-          <Metric label="Đã đưa vào hệ thống" value={stats.published ?? 0} icon={<CheckCircle2 size={18} />} tone="green" />
+          <Metric label="Chờ xác nhận" value={waitingForConfirm} icon={<CheckCircle2 size={18} />} tone="green" />
           <Metric label="Cần xem lại" value={issues} icon={<AlertTriangle size={18} />} tone="red" />
         </section>
 
@@ -339,7 +384,7 @@ export function App() {
               <FilterButton active={filter === "all"} onClick={() => setFilter("all")}>Tất cả</FilterButton>
               <FilterButton active={filter === "review"} onClick={() => setFilter("review")}>Cần xem lại</FilterButton>
               <FilterButton active={filter === "processing"} onClick={() => setFilter("processing")}>Đang xử lý</FilterButton>
-              <FilterButton active={filter === "published"} onClick={() => setFilter("published")}>Đã vào hệ thống</FilterButton>
+              <FilterButton active={filter === "published"} onClick={() => setFilter("published")}>Chờ xác nhận</FilterButton>
             </div>
             <div className="table-wrap">
               <table className="queue-table">
@@ -365,7 +410,7 @@ export function App() {
                       <td><StatusBadge status={document.status} retrying={retrying} /></td>
                       <td className="numeric">{document.item_count ?? 0}</td>
                       <td><div className="row-actions">
-                        {(document.status === "failed" || document.status === "needs_review" || document.status === "completed" || document.status === "published") && <button type="button" className="icon-button compact" title="Đọc lại tài liệu" disabled={retrying} onClick={(event) => { event.stopPropagation(); void retry(document.id); }}>{retrying ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}</button>}
+                        {(document.status === "failed" || document.status === "needs_review" || document.status === "completed" || document.status === "published" || document.status === "Chưa xác nhận") && <button type="button" className="icon-button compact" title="Đọc lại tài liệu" disabled={retrying} onClick={(event) => { event.stopPropagation(); void retry(document.id); }}>{retrying ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}</button>}
                         {!isProcessingStatus(document.status) && !retrying && <button type="button" className="icon-button compact danger-icon" title="Xóa tài liệu" disabled={deletingId === document.id} onClick={(event) => { event.stopPropagation(); void removeDocument(document.id, document.original_name); }}><Trash2 size={16} /></button>}
                         <ChevronRight size={17} />
                       </div></td>
@@ -390,7 +435,12 @@ function Metric({ label, value, icon, tone = "neutral" }: { label: string; value
 
 function StatusBadge({ status, retrying = false }: { status: Status; retrying?: boolean }) {
   const active = retrying || ["queued", "preprocessing", "ocr_running", "validating", "publishing"].includes(status);
-  return <span className={`status ${retrying ? "status-retrying" : `status-${status}`}`}>{active && <LoaderCircle className="spin" size={13} />}{retrying ? "Đang đọc lại" : STATUS_LABELS[status]}</span>;
+  return <span className={`status ${retrying ? "status-retrying" : `status-${statusClass(status)}`}`}>{active && <LoaderCircle className="spin" size={13} />}{retrying ? "Đang đọc lại" : STATUS_LABELS[status]}</span>;
+}
+
+function statusClass(status: Status): string {
+  if (status === "Chưa xác nhận") return "waiting";
+  return status;
 }
 
 function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm, onDelete }: { document: DocumentDetail; deleting: boolean; retrying: boolean; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void>; onDelete: (id: string, name: string) => Promise<void> }) {
@@ -403,7 +453,7 @@ function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm,
   const warnings = [...new Set(document.warnings
     .map(displayUserMessage)
     .filter((warning): warning is string => Boolean(warning)))];
-  const canRetry = (["failed", "needs_review", "completed", "published"] as Status[]).includes(document.status);
+  const canRetry = (["failed", "needs_review", "completed", "published", "Chưa xác nhận"] as Status[]).includes(document.status);
   const canDelete = !isProcessingStatus(document.status);
   const canConfirm = false;
   const hasPoNumber = Boolean(document.po_number) || poNumbers.length > 0;
@@ -438,6 +488,7 @@ function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm,
       </button>
       {warningsExpanded && <div className="collapse-content">{warnings.map((warning) => <div key={warning}><AlertTriangle size={14} /><span>{warning}</span></div>)}</div>}
     </section>}
+    {document.status === "Chưa xác nhận" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã đọc xong, chờ xác nhận trên iDempiere</strong><span>ID tạm: {document.published_order_ids.join(", ") || "Đã lưu thành công"}.</span></div></div>}
     {document.status === "published" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã chuyển sang bảng đơn hàng</strong><span>ID đơn: {document.published_order_ids.join(", ") || "Đã lưu thành công"}; chỉnh sửa tiếp trong iDempiere.</span></div></div>}
     {canConfirm && <section className={`mapping-band collapsible-panel ${poChecksExpanded ? "expanded" : ""}`}>
       <button type="button" className="collapse-trigger" aria-expanded={poChecksExpanded} onClick={() => setPoChecksExpanded((current) => !current)}>
@@ -673,7 +724,7 @@ function displayUserMessage(value: string) {
 }
 
 function isProcessingStatus(status: Status) {
-  return ["preprocessing", "ocr_running", "validating", "publishing"].includes(status);
+  return ["queued", "preprocessing", "ocr_running", "validating", "publishing"].includes(status);
 }
 
 function formatMoney(value: string | null, currency: string | null) {

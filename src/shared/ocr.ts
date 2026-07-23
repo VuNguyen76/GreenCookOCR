@@ -282,6 +282,7 @@ export type DocumentStatus =
   | "validating"
   | "completed"
   | "needs_review"
+  | "Chưa xác nhận"
   | "publishing"
   | "published"
   | "publish_failed"
