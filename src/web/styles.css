@@ -299,10 +299,10 @@ code { font-size: 11px; color: #5a665f; }
   white-space: nowrap;
 }
 .status-queued, .status-retrying { color: #0d573a; background: #e4f2eb; }
-.status-preprocessing, .status-ocr_running, .status-validating, .status-publishing, .status-waiting,
+.status-preprocessing, .status-ocr_running, .status-validating, .status-waiting,
 .status-needs_review { color: #865705; background: #fff0cc; }
-.status-completed, .status-published { color: #0e5c3d; background: #e2f2ea; }
-.status-failed, .status-publish_failed { color: #983728; background: #fae4df; }
+.status-completed { color: #0e5c3d; background: #e2f2ea; }
+.status-failed { color: #983728; background: #fae4df; }
 .empty-state { height: 150px; text-align: center; color: #8b9691; cursor: default; }
 
 .detail-pane {
@@ -411,20 +411,20 @@ code { font-size: 11px; color: #5a665f; }
 .source-field-grid > div { min-width: 0; display: flex; flex-direction: column; }
 .source-field-grid span { color: #7a8580; font-size: 10px; }
 .source-field-grid strong { margin-top: 3px; color: #25322c; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
-.publish-success {
+.pending-review {
   margin: 12px 20px 0;
   padding: 11px 12px;
   display: flex;
   align-items: center;
   gap: 9px;
-  color: #0d573a;
-  background: #e8f4ee;
-  border: 1px solid #cfe4d8;
+  color: #6a4a0b;
+  background: #fff8e8;
+  border: 1px solid #efdcae;
   border-radius: 7px;
 }
-.publish-success > div { display: flex; flex-direction: column; }
-.publish-success strong { font-size: 13px; }
-.publish-success span { margin-top: 2px; font-size: 11px; color: #527064; }
+.pending-review > div { display: flex; flex-direction: column; }
+.pending-review strong { font-size: 13px; }
+.pending-review span { margin-top: 2px; font-size: 11px; color: #735719; }
 .mapping-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .mapping-heading > div, .partner-mapping { display: flex; flex-direction: column; }
 .mapping-heading span, .partner-mapping > span { color: #74807b; font-size: 10px; text-transform: uppercase; font-weight: 800; }
@@ -531,7 +531,7 @@ code { font-size: 11px; color: #5a665f; }
   .detail-meta { padding: 12px 14px; grid-template-columns: 1fr 1fr; gap: 12px; }
   .totals-strip strong, .totals-strip .emphasis strong { font-size: 14px; }
   .totals-strip > div { padding: 11px 10px; }
-  .detail-error, .warning-list, .mapping-band, .source-fields, .publish-success { margin-left: 12px; margin-right: 12px; }
+  .detail-error, .warning-list, .mapping-band, .source-fields, .pending-review { margin-left: 12px; margin-right: 12px; }
   .source-field-grid { grid-template-columns: 1fr; }
   .source-field-scroll { max-height: 32vh; }
   .detail-table-heading { padding: 10px 14px; }

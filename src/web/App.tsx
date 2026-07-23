@@ -20,7 +20,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { localizeOcrWarning } from "../shared/warning-messages.js";
 
-type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "completed" | "needs_review" | "Chưa xác nhận" | "failed" | "publishing" | "published" | "publish_failed";
+type Status = "queued" | "preprocessing" | "ocr_running" | "validating" | "completed" | "needs_review" | "Chưa xác nhận" | "failed";
 
 interface DocumentSummary {
   id: string;
@@ -50,20 +50,6 @@ interface DocumentDetail extends DocumentSummary {
   tax_amount: string | null;
   total_amount: string | null;
   normalized_result: Record<string, unknown> | null;
-  published_order_ids: string[];
-  po_references: Array<{
-    poNumber: string;
-    matched: boolean;
-    reference: {
-      sourceTable: "C_Order";
-      sourceRecordId: string;
-      sourceValue: string;
-      documentNo: string;
-      documentStatus: string;
-      partnerName: string | null;
-      sourceDocumentId: string | null;
-    } | null;
-  }>;
   items: Array<{
     id: string;
     line_no: number;
@@ -109,13 +95,10 @@ const STATUS_LABELS: Record<Status, string> = {
   completed: "Sẵn sàng",
   needs_review: "Cần xem lại",
   "Chưa xác nhận": "Chờ xác nhận",
-  failed: "Không xử lý được",
-  publishing: "Đang lưu",
-  published: "Đã đưa vào hệ thống",
-  publish_failed: "Chưa lưu được"
+  failed: "Không xử lý được"
 };
 const VI_NUMBER_FORMAT = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 6 });
-type DocumentFilter = "all" | "review" | "processing" | "published";
+type DocumentFilter = "all" | "review" | "processing" | "waiting";
 const ACTIVE_POLL_MS = 5000;
 const IDLE_POLL_MS = 60000;
 
@@ -269,22 +252,6 @@ export function App() {
     }
   }, [loadDocuments, openDocument]);
 
-  const confirm = useCallback(async (id: string) => {
-    const response = await fetch(`/api/documents/${id}/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}"
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      setError(payload.error ?? "Không thể xác nhận tài liệu");
-      await openDocument(id);
-      return;
-    }
-    await loadDocuments();
-    await openDocument(id);
-  }, [loadDocuments, openDocument]);
-
   const removeDocument = useCallback(async (id: string, name: string) => {
     if (!window.confirm(`Xóa tài liệu "${name}" và file đã upload?`)) return;
     setDeletingId(id);
@@ -305,18 +272,18 @@ export function App() {
   }, [loadDocuments]);
 
   const total = useMemo(() => Object.values(stats).reduce((sum, count) => sum + count, 0), [stats]);
-  const processing = (stats.queued ?? 0) + (stats.preprocessing ?? 0) + (stats.ocr_running ?? 0) + (stats.validating ?? 0) + (stats.publishing ?? 0);
+  const processing = (stats.queued ?? 0) + (stats.preprocessing ?? 0) + (stats.ocr_running ?? 0) + (stats.validating ?? 0);
   const waitingForConfirm = stats["Chưa xác nhận"] ?? 0;
-  const issues = (stats.failed ?? 0) + (stats.needs_review ?? 0) + (stats.publish_failed ?? 0);
+  const issues = (stats.failed ?? 0) + (stats.needs_review ?? 0);
   const visibleDocuments = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase("vi");
     return documents.filter((document) => {
       const matchesQuery = !keyword || [document.original_name, document.document_title, document.issuer_name]
         .some((value) => value?.toLocaleLowerCase("vi").includes(keyword));
       const matchesFilter = filter === "all"
-        || (filter === "review" && ["needs_review", "failed", "publish_failed"].includes(document.status))
+        || (filter === "review" && ["needs_review", "failed"].includes(document.status))
         || (filter === "processing" && isProcessingStatus(document.status))
-        || (filter === "published" && ["Chưa xác nhận", "published"].includes(document.status));
+        || (filter === "waiting" && document.status === "Chưa xác nhận");
       return matchesQuery && matchesFilter;
     });
   }, [documents, filter, query]);
@@ -384,7 +351,7 @@ export function App() {
               <FilterButton active={filter === "all"} onClick={() => setFilter("all")}>Tất cả</FilterButton>
               <FilterButton active={filter === "review"} onClick={() => setFilter("review")}>Cần xem lại</FilterButton>
               <FilterButton active={filter === "processing"} onClick={() => setFilter("processing")}>Đang xử lý</FilterButton>
-              <FilterButton active={filter === "published"} onClick={() => setFilter("published")}>Chờ xác nhận</FilterButton>
+              <FilterButton active={filter === "waiting"} onClick={() => setFilter("waiting")}>Chờ xác nhận</FilterButton>
             </div>
             <div className="table-wrap">
               <table className="queue-table">
@@ -410,7 +377,7 @@ export function App() {
                       <td><StatusBadge status={document.status} retrying={retrying} /></td>
                       <td className="numeric">{document.item_count ?? 0}</td>
                       <td><div className="row-actions">
-                        {(document.status === "failed" || document.status === "needs_review" || document.status === "completed" || document.status === "published" || document.status === "Chưa xác nhận") && <button type="button" className="icon-button compact" title="Đọc lại tài liệu" disabled={retrying} onClick={(event) => { event.stopPropagation(); void retry(document.id); }}>{retrying ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}</button>}
+                        {(document.status === "failed" || document.status === "needs_review" || document.status === "completed" || document.status === "Chưa xác nhận") && <button type="button" className="icon-button compact" title="Đọc lại tài liệu" disabled={retrying} onClick={(event) => { event.stopPropagation(); void retry(document.id); }}>{retrying ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}</button>}
                         {!isProcessingStatus(document.status) && !retrying && <button type="button" className="icon-button compact danger-icon" title="Xóa tài liệu" disabled={deletingId === document.id} onClick={(event) => { event.stopPropagation(); void removeDocument(document.id, document.original_name); }}><Trash2 size={16} /></button>}
                         <ChevronRight size={17} />
                       </div></td>
@@ -422,7 +389,7 @@ export function App() {
             </div>
           </div>
 
-          {selected && <DetailPane key={selected.id} document={selected} deleting={deletingId === selected.id} retrying={retryingIds.has(selected.id)} onClose={() => setSelected(null)} onRetry={retry} onConfirm={confirm} onDelete={removeDocument} />}
+          {selected && <DetailPane key={selected.id} document={selected} deleting={deletingId === selected.id} retrying={retryingIds.has(selected.id)} onClose={() => setSelected(null)} onRetry={retry} onDelete={removeDocument} />}
         </section>
       </main>
     </div>
@@ -434,7 +401,7 @@ function Metric({ label, value, icon, tone = "neutral" }: { label: string; value
 }
 
 function StatusBadge({ status, retrying = false }: { status: Status; retrying?: boolean }) {
-  const active = retrying || ["queued", "preprocessing", "ocr_running", "validating", "publishing"].includes(status);
+  const active = retrying || ["queued", "preprocessing", "ocr_running", "validating"].includes(status);
   return <span className={`status ${retrying ? "status-retrying" : `status-${statusClass(status)}`}`}>{active && <LoaderCircle className="spin" size={13} />}{retrying ? "Đang đọc lại" : STATUS_LABELS[status]}</span>;
 }
 
@@ -443,9 +410,8 @@ function statusClass(status: Status): string {
   return status;
 }
 
-function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm, onDelete }: { document: DocumentDetail; deleting: boolean; retrying: boolean; onClose: () => void; onRetry: (id: string) => Promise<void>; onConfirm: (id: string) => Promise<void>; onDelete: (id: string, name: string) => Promise<void> }) {
+function DetailPane({ document, deleting, retrying, onClose, onRetry, onDelete }: { document: DocumentDetail; deleting: boolean; retrying: boolean; onClose: () => void; onRetry: (id: string) => Promise<void>; onDelete: (id: string, name: string) => Promise<void> }) {
   const [warningsExpanded, setWarningsExpanded] = useState(false);
-  const [poChecksExpanded, setPoChecksExpanded] = useState(false);
   const [sourceExpanded, setSourceExpanded] = useState(true);
   const poNumbers = [...new Set(document.items.map((item) => item.po_number).filter((value): value is string => Boolean(value)))];
   const hasRowOrders = poNumbers.length > 1;
@@ -453,12 +419,8 @@ function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm,
   const warnings = [...new Set(document.warnings
     .map(displayUserMessage)
     .filter((warning): warning is string => Boolean(warning)))];
-  const canRetry = (["failed", "needs_review", "completed", "published", "Chưa xác nhận"] as Status[]).includes(document.status);
+  const canRetry = (["failed", "needs_review", "completed", "Chưa xác nhận"] as Status[]).includes(document.status);
   const canDelete = !isProcessingStatus(document.status);
-  const canConfirm = false;
-  const hasPoNumber = Boolean(document.po_number) || poNumbers.length > 0;
-  const duplicatePo = document.po_references.some((check) => check.matched);
-  const readyToPublish = hasPoNumber;
   const documentFields = buildDocumentFields(document, poSummary, hasRowOrders);
   const additionalFields = [...documentFields, ...buildAdditionalFields(document, documentFields)];
 
@@ -488,21 +450,7 @@ function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm,
       </button>
       {warningsExpanded && <div className="collapse-content">{warnings.map((warning) => <div key={warning}><AlertTriangle size={14} /><span>{warning}</span></div>)}</div>}
     </section>}
-    {document.status === "Chưa xác nhận" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã đọc xong, chờ xác nhận trên iDempiere</strong><span>ID tạm: {document.published_order_ids.join(", ") || "Đã lưu thành công"}.</span></div></div>}
-    {document.status === "published" && <div className="publish-success"><CheckCircle2 size={17} /><div><strong>Đã chuyển sang bảng đơn hàng</strong><span>ID đơn: {document.published_order_ids.join(", ") || "Đã lưu thành công"}; chỉnh sửa tiếp trong iDempiere.</span></div></div>}
-    {canConfirm && <section className={`mapping-band collapsible-panel ${poChecksExpanded ? "expanded" : ""}`}>
-      <button type="button" className="collapse-trigger" aria-expanded={poChecksExpanded} onClick={() => setPoChecksExpanded((current) => !current)}>
-        <span><CheckCircle2 size={15} /><strong>Kiểm tra số PO</strong><small>{document.po_references.length || (hasPoNumber ? 1 : 0)} số</small></span>
-        {poChecksExpanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
-      </button>
-      {poChecksExpanded && <div className="collapse-content"><div className="mapping-heading"><div><span>Kết quả đối chiếu</span><strong>{hasPoNumber ? "So với dữ liệu hiện có" : "Chưa tìm thấy số PO"}</strong></div></div>
-      {document.po_references.map((check) => <div className="partner-mapping" key={check.poNumber}>
-        <span>Số PO: {check.poNumber}</span>
-        {check.reference
-          ? <strong className="already-exists"><AlertTriangle size={15} />Đã có ở đơn {check.reference.documentNo}</strong>
-          : <strong className="not-found"><AlertTriangle size={15} />Chưa có trong hệ thống</strong>}
-      </div>)}</div>}
-    </section>}
+    {document.status === "Chưa xác nhận" && <div className="pending-review"><Clock3 size={17} /><div><strong>Đã lưu vào bảng tạm</strong><span>Chờ người dùng xác nhận trong iDempiere.</span></div></div>}
     <div className="detail-table-heading"><h3>Dòng sản phẩm</h3><span>{document.items.length} dòng</span></div>
     <div className="detail-table-wrap"><table className={`product-table ${hasRowOrders ? "with-orders" : ""}`}><thead><tr><th>#</th>{hasRowOrders && <th>PO / Cửa hàng</th>}<th>Mã sản phẩm</th><th>Barcode</th><th>Tên sản phẩm</th><th className="numeric">Số lượng</th><th>Đơn vị</th><th className="numeric">Thuế suất</th><th className="numeric">Đơn giá</th><th className="numeric">Thành tiền</th></tr></thead><tbody>
       {document.items.map((item) => <tr key={item.id}><td>{item.line_no}</td>{hasRowOrders && <td className="po-cell"><strong>{item.po_number ?? "-"}</strong><span>{item.store_name ?? item.store_code ?? "-"}</span></td>}<td><strong>{item.product_code ?? item.vendor_product_code ?? "-"}</strong>{item.product_code && item.vendor_product_code && <span>NCC: {item.vendor_product_code}</span>}</td><td className="mono">{item.barcode ?? "-"}</td><td><strong>{item.product_name ?? "-"}</strong>{item.model && <span>Model: {item.model}</span>}<ItemExtraFields item={item} /></td><td className="numeric"><strong>{formatDecimal(item.quantity)}</strong>{item.units_per_order_unit && item.units_per_order_unit !== "1" && <span>× {formatDecimal(item.units_per_order_unit)} / ĐVT</span>}</td><td><strong>{item.unit ?? "-"}</strong></td><td className="numeric vat-cell">{formatVatRate(item.vat_rate)}</td><td className="numeric money-cell">{formatMoney(item.unit_price, null)}</td><td className="numeric money-cell strong">{formatMoney(item.amount, null)}</td></tr>)}
@@ -519,7 +467,6 @@ function DetailPane({ document, deleting, retrying, onClose, onRetry, onConfirm,
       {!document.items.length && <div className="empty-state">Chưa có dữ liệu</div>}
     </div>
     {(canRetry || canDelete) && <div className="detail-footer">
-      {canConfirm && <button type="button" className="primary-button" disabled={!readyToPublish} title={publishBlocker(hasPoNumber, duplicatePo)} onClick={() => void onConfirm(document.id)}><CheckCircle2 size={17} />Xác nhận và tạo đơn</button>}
       {canRetry && <button type="button" className="secondary-button" disabled={retrying} onClick={() => void onRetry(document.id)}>{retrying ? <LoaderCircle className="spin" size={17} /> : <RotateCcw size={17} />}{retrying ? "Đang đọc lại" : "Đọc lại"}</button>}
       {canDelete && !retrying && <button type="button" className="danger-button" disabled={deleting} onClick={() => void onDelete(document.id, document.original_name)}>{deleting ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}Xóa chứng từ</button>}
     </div>}
@@ -638,12 +585,6 @@ function displayFieldValue(value: unknown): string {
   return "";
 }
 
-function publishBlocker(hasPo: boolean, duplicatePo: boolean): string {
-  if (!hasPo) return "Chưa có số PO để đối chiếu";
-  if (duplicatePo) return "PO đã có sẽ được ghi nhận, PO chưa có sẽ được tạo mới";
-  return "Xác nhận và tạo đơn đặt hàng trong iDempiere";
-}
-
 function fileIcon(name: string) {
   const extension = name.split(".").pop()?.toLowerCase();
   if (extension === "xlsx") return <FileSpreadsheet size={19} />;
@@ -724,7 +665,7 @@ function displayUserMessage(value: string) {
 }
 
 function isProcessingStatus(status: Status) {
-  return ["queued", "preprocessing", "ocr_running", "validating", "publishing"].includes(status);
+  return ["queued", "preprocessing", "ocr_running", "validating"].includes(status);
 }
 
 function formatMoney(value: string | null, currency: string | null) {

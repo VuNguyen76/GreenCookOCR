@@ -283,9 +283,6 @@ export type DocumentStatus =
   | "completed"
   | "needs_review"
   | "Chưa xác nhận"
-  | "publishing"
-  | "published"
-  | "publish_failed"
   | "failed";
 
 export interface DocumentRow {

@@ -8,7 +8,6 @@ import { fileTypeFromFile } from "file-type";
 import { z } from "zod";
 import { config } from "../config.js";
 import {
-  confirmDocument,
   createBatch,
   deleteDocument,
   getDocument,
@@ -17,7 +16,6 @@ import {
   listDocuments,
   retryDocument
 } from "../db/repository.js";
-import { checkPoReferences } from "../idempiere/po-reference.js";
 
 const BatchSchema = z.object({ fileCount: z.number().int().positive().max(500) });
 const IdParams = z.object({ id: z.uuid() });
@@ -102,9 +100,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     const { id } = IdParams.parse(request.params);
     const document = await getDocument(id);
     if (!document) return reply.code(404).send({ error: "Không tìm thấy tài liệu" });
-    const poNumbers = [document.po_number, ...document.items.map((item) => item.po_number)]
-      .filter((value): value is string => Boolean(value));
-    return { ...document, po_references: await checkPoReferences(poNumbers) };
+    return { ...document, po_references: [] };
   });
 
   app.post("/api/documents/:id/retry", async (request, reply) => {
@@ -115,27 +111,12 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true };
   });
 
-  app.post("/api/documents/:id/confirm", async (request, reply) => {
-    const { id } = IdParams.parse(request.params);
-    const document = await getDocument(id);
-    if (!document) return reply.code(404).send({ error: "Không tìm thấy tài liệu" });
-    const hasPoNumber = Boolean(document.po_number)
-      || document.items.some((item) => Boolean(item.po_number));
-    if (!hasPoNumber) {
-      return reply.code(409).send({ error: "Chưa đọc được Số PO nên chưa thể đối chiếu với hệ thống" });
-    }
-    return await confirmDocument(id);
-  });
-
   app.delete("/api/documents/:id", async (request, reply) => {
     const { id } = IdParams.parse(request.params);
     const result = await deleteDocument(id);
     if (!result.deleted) {
       if (result.reason === "not_found") {
         return reply.code(404).send({ error: "Không tìm thấy tài liệu" });
-      }
-      if (result.reason === "confirmed") {
-        return reply.code(409).send({ error: "Chứng từ đã đưa vào hệ thống nên không xóa ở hàng chờ tạm." });
       }
       return reply.code(409).send({ error: "Tài liệu đang được OCR. Vui lòng đợi xử lý xong rồi xóa." });
     }

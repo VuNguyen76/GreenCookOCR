@@ -3,7 +3,7 @@ import type { PoolClient, QueryResult } from "pg";
 import { config } from "../config.js";
 import { sanitizeClientErrorMessage } from "../services/public-errors.js";
 import type { ReconciliationResult } from "../services/reconciliation.js";
-import type { DocumentRow, DocumentStatus, OcrDocument } from "../../shared/ocr.js";
+import type { DocumentRow, DocumentStatus, OcrDocument, OcrItem } from "../../shared/ocr.js";
 import { pool } from "./pool.js";
 
 export interface NewDocument {
@@ -26,13 +26,6 @@ export interface PublishJob {
   error_message: string | null;
 }
 
-export interface ConfirmDocumentResult {
-  ok: boolean;
-  status: "confirmed" | "already_exists";
-  kgOrderId: string | null;
-  message: string;
-}
-
 type Queryable = {
   query<T extends Record<string, unknown> = Record<string, unknown>>(
     text: string,
@@ -44,7 +37,7 @@ type Connectable = Queryable & {
   connect(): Promise<PoolClient>;
 };
 
-const ACTIVE_STATUSES: DocumentStatus[] = ["preprocessing", "ocr_running", "validating", "publishing"];
+const ACTIVE_STATUSES: DocumentStatus[] = ["preprocessing", "ocr_running", "validating"];
 
 export class StagingRepository {
   constructor(private readonly database: Connectable = pool) {}
@@ -146,11 +139,15 @@ export class StagingRepository {
 
   async getStats(): Promise<Record<string, number>> {
     const rows = await this.database.query<{ status: string; count: string }>(`
-      SELECT coalesce(trang_thai_xu_ly, 'queued') AS status, count(*)::text AS count
+      SELECT CASE
+               WHEN trang_thai_xu_ly IN ('published', 'publish_failed') THEN 'Chưa xác nhận'
+               ELSE coalesce(trang_thai_xu_ly, 'queued')
+             END AS status,
+             count(*)::text AS count
       FROM adempiere.kg_order_ai_test
       WHERE ad_client_id = $1
         AND ma_tai_lieu_nguon IS NOT NULL
-      GROUP BY coalesce(trang_thai_xu_ly, 'queued')
+      GROUP BY 1
     `, [config.targetAdClientId]);
     return Object.fromEntries(rows.rows.map((row) => [row.status, Number(row.count)]));
   }
@@ -165,7 +162,7 @@ export class StagingRepository {
       WHERE ad_client_id = $2
         AND trang_thai_xu_ly = ANY($3::text[])
         AND updated < now() - interval '2 minutes'
-    `, [config.targetAdUserId, config.targetAdClientId, ACTIVE_STATUSES.filter((status) => status !== "publishing")]);
+    `, [config.targetAdUserId, config.targetAdClientId, ACTIVE_STATUSES]);
   }
 
   async claimNextDocument(): Promise<DocumentRow | null> {
@@ -274,6 +271,25 @@ export class StagingRepository {
       normalized.supplier_name
     ]);
     const headerVatRate = firstNonEmpty(normalized.items.map((item) => item.vat_rate));
+    const pageCount = pageCountFromOcr(rawResult, normalized);
+    const rawText = rawTextFromOcr(rawResult, normalized);
+    const invoiceDate = normalizeDateForDb(rawFieldValue(normalized.raw_fields, [
+      "ngay xuat hoa don",
+      "ngay hoa don",
+      "invoice date"
+    ]));
+    const orderStatus = rawFieldValue(normalized.raw_fields, [
+      "trang thai don hang",
+      "order status",
+      "status"
+    ]);
+    const promotionCode = rawFieldValue(normalized.raw_fields, [
+      "ma khuyen mai",
+      "promotion code",
+      "promo code",
+      "promotion",
+      "khuyen mai"
+    ]);
     const client = await this.database.connect();
     try {
       await client.query("BEGIN");
@@ -295,7 +311,7 @@ export class StagingRepository {
             dong, dong_nguon, trang_nguon, barcode,
             ten_san_pham_khach_hang, ten_san_pham_cong_ty, quy_cach,
             so_luong, don_vi_tinh, so_luong_quy_doi,
-            don_gia_khach_hang,
+            don_gia_khach_hang, don_gia_cong_ty,
             ty_le_vat, thanh_tien,
             trang_thai_lien_ket, raw_json, description
           ) VALUES (
@@ -303,9 +319,9 @@ export class StagingRepository {
             $5, $5, $6, $7,
             $8, $9, $10,
             $11::numeric, $12, $13::numeric,
-            $14::numeric,
-            $15::numeric, $16::numeric,
-            $17, $18::jsonb, $19
+            $14::numeric, $15::numeric,
+            $16::numeric, $17::numeric,
+            $18, $19::jsonb, $20
           )
         `, [
           config.targetAdClientId,
@@ -322,6 +338,7 @@ export class StagingRepository {
           item.unit,
           numericOrNull(item.units_per_order_unit),
           numericOrNull(item.unit_price),
+          detailCompanyUnitPrice(item),
           numericOrNull(item.vat_rate),
           numericOrNull(item.amount),
           audit?.matchMethod ?? "source",
@@ -349,10 +366,13 @@ export class StagingRepository {
           value = coalesce($3, $4, ma_tai_lieu_nguon),
           tieu_de_chung_tu = $5,
           loai_chung_tu = $6,
+          so_trang = $24::integer,
+          raw_text = $25,
           so_po = $3,
           order_id = $4,
           ngay_dat_hang = $7::date,
           ngay_giao_hang = $8::date,
+          ngay_xuat_hoa_don = $26::date,
           ma_nha_cung_cap = $9,
           ten_nha_cung_cap = $10,
           ma_cua_hang = $11,
@@ -380,11 +400,13 @@ export class StagingRepository {
             LIMIT 1
           )),
           ten_nhan_vien_kinh_doanh = $20,
+          trang_thai_don_hang = $27,
+          ma_khuyen_mai = $28,
           ty_le_vat = $21::numeric,
           phuong_thuc_trich_xuat = $18,
           raw_json = coalesce(raw_json, '{}'::jsonb) || $19::jsonb,
           thoi_gian_xac_nhan = NULL,
-          kiem_tra_file = 'Y',
+          kiem_tra_file = 'N',
           button_confirm = 'N',
           button_xacnhan = 'N',
           description = NULL,
@@ -430,7 +452,12 @@ export class StagingRepository {
         salesContact,
         numericOrNull(headerVatRate),
         partnerNames,
-        config.targetAdClientId
+        config.targetAdClientId,
+        pageCount,
+        rawText,
+        invoiceDate,
+        orderStatus,
+        promotionCode
       ]);
       await client.query("COMMIT");
       return "Chưa xác nhận";
@@ -482,7 +509,7 @@ export class StagingRepository {
           thoi_gian_xac_nhan = NULL,
           kiem_tra_file = 'N',
           button_confirm = 'N',
-          button_xacnhan = NULL,
+          button_xacnhan = 'N',
           updated = now(),
           updatedby = $1
       WHERE ma_tai_lieu_nguon = $2
@@ -492,33 +519,9 @@ export class StagingRepository {
       config.targetAdUserId,
       id,
       config.targetAdClientId,
-      ["failed", "needs_review", "completed", "publish_failed", "published", "Chưa xác nhận", "preprocessing", "ocr_running", "validating"]
+      ["failed", "needs_review", "completed", "Chưa xác nhận", "published", "publish_failed", "preprocessing", "ocr_running", "validating"]
     ]);
     return Number(result.rowCount) > 0;
-  }
-
-  async confirmDocument(id: string): Promise<ConfirmDocumentResult> {
-    const result = await this.database.query<{ kg_order_ai_test_id: string }>(`
-      UPDATE adempiere.kg_order_ai_test
-      SET trang_thai_xu_ly = 'published',
-          thoi_gian_xac_nhan = coalesce(thoi_gian_xac_nhan, now()),
-          kiem_tra_file = 'Y',
-          button_confirm = 'Y',
-          button_xacnhan = 'Y',
-          updated = now(),
-          updatedby = $2
-      WHERE ma_tai_lieu_nguon = $1
-        AND ad_client_id = $3
-      RETURNING kg_order_ai_test_id::text
-    `, [id, config.targetAdUserId, config.targetAdClientId]);
-    const row = result.rows[0];
-    if (!row) throw new Error("Không tìm thấy chứng từ để xác nhận.");
-    return {
-      ok: true,
-      status: "confirmed",
-      kgOrderId: row.kg_order_ai_test_id,
-      message: "Đã lưu kết quả đọc vào bảng xử lý."
-    };
   }
 
   async setTargetPartner(id: string, bpartnerId: string, bpartnerName: string): Promise<boolean> {
@@ -530,7 +533,7 @@ export class StagingRepository {
           updatedby = $3
       WHERE ma_tai_lieu_nguon = $4
         AND ad_client_id = $5
-        AND trang_thai_xu_ly IN ('needs_review', 'publish_failed', 'published')
+        AND trang_thai_xu_ly IN ('needs_review', 'Chưa xác nhận')
     `, [bpartnerId, bpartnerName, config.targetAdUserId, id, config.targetAdClientId]);
     return Number(result.rowCount) > 0;
   }
@@ -553,7 +556,7 @@ export class StagingRepository {
         AND document.ma_tai_lieu_nguon = $6
         AND item.kg_order_detail_ai_test_id = $2::numeric
         AND document.ad_client_id = $7
-        AND document.trang_thai_xu_ly IN ('needs_review', 'publish_failed', 'published')
+        AND document.trang_thai_xu_ly IN ('needs_review', 'Chưa xác nhận')
     `, [product.id, itemId, product.name ?? product.value, method, config.targetAdUserId, documentId, config.targetAdClientId]);
     return Number(result.rowCount) > 0;
   }
@@ -578,7 +581,18 @@ export class StagingRepository {
         await client.query("COMMIT");
         return { deleted: false, reason: "processing" };
       }
-      await client.query("DELETE FROM adempiere.kg_order_ai_test WHERE ma_tai_lieu_nguon = $1", [id]);
+      await client.query(`
+        DELETE FROM adempiere.kg_order_detail_ai_test detail
+        USING adempiere.kg_order_ai_test document
+        WHERE detail.kg_order_ai_test_id = document.kg_order_ai_test_id
+          AND document.ma_tai_lieu_nguon = $1
+          AND document.ad_client_id = $2
+      `, [id, config.targetAdClientId]);
+      await client.query(`
+        DELETE FROM adempiere.kg_order_ai_test
+        WHERE ma_tai_lieu_nguon = $1
+          AND ad_client_id = $2
+      `, [id, config.targetAdClientId]);
       await client.query("COMMIT");
       return { deleted: true, storedName: document.stored_name };
     } catch (error) {
@@ -616,12 +630,6 @@ export class StagingRepository {
     if (!publicErrorMessage) return;
   }
 
-  async queuePublish(id: string): Promise<boolean> {
-    const document = await this.confirmDocument(id);
-    if (!document.ok) return false;
-    return true;
-  }
-
   async claimNextPublishJob(): Promise<PublishJob | null> {
     return null;
   }
@@ -639,7 +647,7 @@ export class StagingRepository {
 
 export type DeleteDocumentResult =
   | { deleted: true; storedName: string }
-  | { deleted: false; reason: "not_found" | "processing" | "confirmed" };
+  | { deleted: false; reason: "not_found" | "processing" };
 
 const repository = new StagingRepository();
 
@@ -663,8 +671,6 @@ export const completeDocument = (
 export const failDocument = (id: string, attempts: number, error: unknown) =>
   repository.failDocument(id, attempts, error);
 export const retryDocument = (id: string) => repository.retryDocument(id);
-export const confirmDocument = (id: string) => repository.confirmDocument(id);
-export const queuePublish = (id: string) => repository.queuePublish(id);
 export const claimNextPublishJob = () => repository.claimNextPublishJob();
 export const markPublished = (jobId: string, documentId: string, orderIds: string[]) =>
   repository.markPublished(jobId, documentId, orderIds);
@@ -700,7 +706,10 @@ const DOCUMENT_SELECT = `
   document.loai_mime AS mime_type,
   document.kich_thuoc_file::text AS size_bytes,
   document.source_sha256 AS sha256,
-  coalesce(document.trang_thai_xu_ly, 'queued') AS status,
+  CASE
+    WHEN document.trang_thai_xu_ly IN ('published', 'publish_failed') THEN 'Chưa xác nhận'
+    ELSE coalesce(document.trang_thai_xu_ly, 'queued')
+  END AS status,
   document.tieu_de_chung_tu AS document_title,
   coalesce(document.raw_json->'normalized_result'->>'template_key', document.phuong_thuc_trich_xuat) AS template_key,
   coalesce(document.raw_json->'normalized_result'->>'issuer_name', document.ten_nha_cung_cap, document.ten_cua_hang) AS issuer_name,
@@ -721,10 +730,6 @@ const DOCUMENT_SELECT = `
   document.raw_json->'normalized_ocr_result' AS normalized_ocr_result,
   document.raw_json->'normalized_result' AS normalized_result,
   document.raw_json->'reconciliation_result' AS reconciliation_result,
-  CASE
-    WHEN document.trang_thai_xu_ly IN ('published', 'Chưa xác nhận') THEN jsonb_build_array(document.kg_order_ai_test_id::text)
-    ELSE '[]'::jsonb
-  END AS published_order_ids,
   document.created::text AS created_at,
   document.updated::text AS updated_at,
   coalesce(document.raw_json->'runtime'->>'completed_at', document.raw_json->>'completed_at') AS completed_at
@@ -741,7 +746,10 @@ const DOCUMENT_LIST_SELECT = `
   document.loai_mime AS mime_type,
   document.kich_thuoc_file::text AS size_bytes,
   document.source_sha256 AS sha256,
-  coalesce(document.trang_thai_xu_ly, 'queued') AS status,
+  CASE
+    WHEN document.trang_thai_xu_ly IN ('published', 'publish_failed') THEN 'Chưa xác nhận'
+    ELSE coalesce(document.trang_thai_xu_ly, 'queued')
+  END AS status,
   document.tieu_de_chung_tu AS document_title,
   coalesce(document.raw_json->'normalized_result'->>'template_key', document.phuong_thuc_trich_xuat) AS template_key,
   coalesce(document.raw_json->'normalized_result'->>'issuer_name', document.ten_nha_cung_cap, document.ten_cua_hang) AS issuer_name,
@@ -758,10 +766,6 @@ const DOCUMENT_LIST_SELECT = `
   coalesce((document.raw_json->'upload'->>'attempts')::int, 0) AS attempts,
   coalesce(document.raw_json->'runtime'->>'error_message', document.description) AS error_message,
   coalesce(document.raw_json->'warnings', '[]'::jsonb) AS warnings,
-  CASE
-    WHEN document.trang_thai_xu_ly IN ('published', 'Chưa xác nhận') THEN jsonb_build_array(document.kg_order_ai_test_id::text)
-    ELSE '[]'::jsonb
-  END AS published_order_ids,
   document.created::text AS created_at,
   document.updated::text AS updated_at,
   coalesce(document.raw_json->'runtime'->>'completed_at', document.raw_json->>'completed_at') AS completed_at
@@ -818,8 +822,7 @@ function hydrateDocumentRow(row: Record<string, unknown>): Record<string, unknow
     raw_result: parseJson(row.raw_result, null),
     normalized_ocr_result: parseJson(row.normalized_ocr_result, null),
     normalized_result: parseJson(row.normalized_result, null),
-    reconciliation_result: parseJson(row.reconciliation_result, null),
-    published_order_ids: parseJson(row.published_order_ids, [])
+    reconciliation_result: parseJson(row.reconciliation_result, null)
   };
 }
 
@@ -887,6 +890,94 @@ function booleanFlag(value: unknown): "Y" | "N" | null {
     const normalized = value.trim().toLowerCase();
     if (["y", "yes", "true", "1", "co", "cÃ³"].includes(normalized)) return "Y";
     if (["n", "no", "false", "0", "khong", "khÃ´ng"].includes(normalized)) return "N";
+  }
+  return null;
+}
+
+function rawFieldValue(fields: OcrDocument["raw_fields"] | OcrItem["extra_fields"], labels: string[]): string | null {
+  if (!Array.isArray(fields)) return null;
+  const expected = new Set(labels.map(normalizeFieldLabel));
+  for (const field of fields) {
+    const label = normalizeFieldLabel(field.label);
+    if (!expected.has(label)) continue;
+    const value = field.value?.trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+function detailCompanyUnitPrice(item: OcrItem): string | null {
+  return numericOrNull(rawFieldValue(item.extra_fields, [
+    "don gia cong ty",
+    "gia cong ty",
+    "company unit price",
+    "company price"
+  ]));
+}
+
+function normalizeFieldLabel(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("vi")
+    .replace(/[^a-z0-9%]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function pageCountFromOcr(rawResult: unknown, normalized: OcrDocument): number | null {
+  const pages = new Set<number>();
+  for (const field of normalized.raw_fields ?? []) addPage(pages, field.page);
+  for (const table of normalized.raw_tables ?? []) addPage(pages, table.page);
+  for (const item of normalized.items) addPage(pages, item.source_page);
+  collectPages(rawResult, pages, 0);
+  return pages.size ? Math.max(...pages) : null;
+}
+
+function addPage(pages: Set<number>, value: unknown): void {
+  const page = Number(value);
+  if (Number.isInteger(page) && page > 0) pages.add(page);
+}
+
+function collectPages(value: unknown, pages: Set<number>, depth: number): void {
+  if (!value || depth > 4) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectPages(item, pages, depth + 1);
+    return;
+  }
+  if (typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  addPage(pages, record.page);
+  addPage(pages, record.source_page);
+  for (const child of Object.values(record)) collectPages(child, pages, depth + 1);
+}
+
+function rawTextFromOcr(rawResult: unknown, normalized: OcrDocument): string | null {
+  const directText = firstDirectText(rawResult);
+  if (directText) return directText.slice(0, 500_000);
+
+  const lines: string[] = [];
+  for (const field of normalized.raw_fields ?? []) {
+    const label = field.label?.trim();
+    const value = field.value?.trim();
+    if (label && value) lines.push(`${label}: ${value}`);
+  }
+  for (const table of normalized.raw_tables ?? []) {
+    if (table.title) lines.push(table.title);
+    if (table.headers.length) lines.push(table.headers.join("\t"));
+    for (const row of table.rows) lines.push(row.join("\t"));
+  }
+  const text = lines.join("\n").trim();
+  return text ? text.slice(0, 500_000) : null;
+}
+
+function firstDirectText(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ["raw_text", "full_text", "text", "markdown", "content"]) {
+    const text = record[key];
+    if (typeof text === "string" && text.trim()) return text.trim();
   }
   return null;
 }
